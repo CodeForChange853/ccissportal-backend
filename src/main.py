@@ -49,8 +49,8 @@ def emergency_setup():
 def check_system_health():
     return {
         "system_status": "Online",
-        "current_allowed_origins": settings.allowed_origins_list,
-        "database_url_configured": bool(settings.DATABASE_URL)
+        "allowed_origins": settings.allowed_origins_list,
+        "gemini_configured": bool(settings.GEMINI_API_KEY) # Tells you if the key is loaded
     }
 
     
