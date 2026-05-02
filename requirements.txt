@@ -1,0 +1,27 @@
+# Web framework
+fastapi
+uvicorn[standard]
+
+# Database
+sqlalchemy
+psycopg2-binary
+
+# Config & environment
+pydantic[email]
+pydantic-settings
+python-dotenv
+
+# Auth & security
+passlib[bcrypt]
+bcrypt==4.0.1
+python-jose[cryptography]
+
+# File uploads & Image Processing
+python-multipart
+pillow
+
+# ML triage engine & AI
+scikit-learn
+tenacity
+google-api-core
+google-genai
