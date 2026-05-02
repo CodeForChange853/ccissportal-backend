@@ -34,7 +34,17 @@ app.include_router(support_router)
 app.include_router(settings_router)
 app.include_router(audit_router)                           
 
-
+# --- TEMPORARY SETUP ROUTE ---
+@app.get("/system-init-secure-99")
+def emergency_setup():
+    from src.core.create_tables import initialize_database
+    from src.core.seed_database import seed_database
+    try:
+        initialize_database()
+        seed_database()
+        return {"status": "SUCCESS", "message": "Database tables created and Admin seeded!"}
+    except Exception as e:
+        return {"status": "ERROR", "error": str(e)}
 @app.get("/")
 def check_system_health():
     return {
