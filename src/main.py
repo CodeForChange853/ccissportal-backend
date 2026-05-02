@@ -49,5 +49,8 @@ def emergency_setup():
 def check_system_health():
     return {
         "system_status": "Online",
-        "message": "University Campus AI System v2.0 is running.",
+        "current_allowed_origins": settings.allowed_origins_list,
+        "database_url_configured": bool(settings.DATABASE_URL)
     }
+
+    
