@@ -20,7 +20,12 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # The asterisk means "Allow Everything"
+    allow_origins=[
+        "http://localhost:5173",
+        "http://localhost:5174",
+        "https://ccissportal-frontend-fvlzpbj3q-garciaadrian1030-5525s-projects.vercel.app"
+    ],
+    allow_origin_regex=r"https://ccissportal-frontend.*\.vercel\.app", # To allow origins to connect to the backend
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -51,7 +56,6 @@ def check_system_health():
     return {
         "system_status": "Online",
         "allowed_origins": settings.allowed_origins_list,
-        "gemini_configured": bool(settings.GEMINI_API_KEY) # Tells you if the key is loaded
     }
 
     
