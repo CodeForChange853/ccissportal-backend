@@ -18,17 +18,23 @@ app = FastAPI(
 )
 
 
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+app = FastAPI()
+
+# Add your Vercel frontend URL here
+origins = [
+    "https://ccissportal-frontend.vercel.app",
+    "http://localhost:3000", # Optional: Keep this if you test locally
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://localhost:5174",
-        "https://ccissportal-frontend-fvlzpbj3q-garciaadrian1030-5525s-projects.vercel.app"
-    ],
-    allow_origin_regex=r"https://ccissportal-frontend.*\.vercel\.app", # To allow origins to connect to the backend
+    allow_origins=origins,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["*"],  # Allows all methods (GET, POST, etc.)
+    allow_headers=["*"],  # Allows all headers
 )
 
 app.include_router(auth_router)
