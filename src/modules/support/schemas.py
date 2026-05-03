@@ -1,14 +1,14 @@
 # backend-v2/src/modules/support/schemas.py
 
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 from datetime import datetime
 
 
 class TicketSubmissionRequest(BaseModel):
-    issue_subject: str
-    issue_description: str
+    issue_subject: str = Field(..., max_length=150)
+    issue_description: str = Field(..., max_length=300)
 
 
 class TicketResponse(BaseModel):
