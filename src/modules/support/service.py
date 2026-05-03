@@ -16,6 +16,8 @@ def process_new_support_ticket(
     database_session: Session,
     student_id: int,
     ticket_data: schemas.TicketSubmissionRequest,
+    actor_email: str | None = None,   # Added to prevent crash
+    ip_address: str | None = None,    # Added to prevent crash
 ) -> models.SupportTicket:
 
     combined_text = f"{ticket_data.issue_subject} {ticket_data.issue_description}"
