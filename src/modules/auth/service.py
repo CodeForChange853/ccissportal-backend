@@ -1,10 +1,14 @@
+import json
 from typing import Optional
 
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
 from passlib.context import CryptContext
-from src.modules.enrollment.models import StudentProfile
-from src.modules.faculty.models import FacultyProfile
+
+# Grouping all your database models together here!
+from src.modules.enrollment.models import StudentProfile, CurriculumSubject
+from src.modules.faculty.models import FacultyProfile, GradebookEntry
+
 from . import schemas, repository, models
 from src.core.security import create_secure_access_token
 from src.modules.settings.service import get_active_passkey
@@ -171,8 +175,6 @@ def process_user_registration(
 
         if registration_data.document_verification_token:
             from src.modules.document_processing.repository import fetch_scan_by_token
-            import json
-            from src.modules.enrollment.models import CurriculumSubject
             
             scan_rec = fetch_scan_by_token(database_session, registration_data.document_verification_token)
             if scan_rec and scan_rec.extracted_ai_data:
@@ -207,8 +209,7 @@ def process_user_registration(
 
         # Historical Grade Auto-Loader
         if computed_year > 1 or computed_sem > 1:
-            from src.modules.enrollment.models import CurriculumSubject
-            from src.modules.faculty.models import GradebookEntry, FacultyProfile
+
             
             course_name = student_profile.current_course.upper()
             if "COMPUTER SCIENCE" in course_name:
