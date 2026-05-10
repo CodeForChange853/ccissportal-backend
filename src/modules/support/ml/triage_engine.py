@@ -64,7 +64,7 @@ class SupportTriageEngine:
         training_labels: list[str],
     ) -> dict:
 
-        MINIMUM_TRAINING_SAMPLES = 20
+        MINIMUM_TRAINING_SAMPLES = 1
 
         if len(training_texts) < MINIMUM_TRAINING_SAMPLES:
             return {
