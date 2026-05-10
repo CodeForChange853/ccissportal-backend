@@ -24,6 +24,7 @@ class SyncGradesResponse(BaseModel):
     skipped_keys: List[str] = []
 
 class ClassRosterResponse(BaseModel):
+    student_account_id: int
     student_id: str
     student_name: str
     system_grade: Optional[float]

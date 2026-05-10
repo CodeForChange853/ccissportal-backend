@@ -154,6 +154,7 @@ def fetch_class_roster_by_subject(
 
         roster.append(
             schemas.ClassRosterResponse(
+                student_account_id=account.account_id,
                 student_id=student_id_str,
                 student_name=name,
                 system_grade=grade.system_grade,
