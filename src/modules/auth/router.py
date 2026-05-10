@@ -56,3 +56,15 @@ def get_my_profile(
         account_role=current_user.account_role,
         is_active_account=current_user.is_active_account,
     )
+
+
+@auth_router.post("/validate-pre-reg")
+def validate_pre_registration_credentials(
+    data: schemas.PreRegistrationValidationRequest,
+    database_session: Session = Depends(get_database_session),
+):
+    """Early check for student number and passkey."""
+    return service.validate_pre_registration(
+        database_session=database_session,
+        data=data,
+    )

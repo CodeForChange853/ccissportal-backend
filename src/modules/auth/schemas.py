@@ -37,6 +37,11 @@ class RegistrationRequest(BaseModel):
     academic_department: Optional[str] = None  
 
 
+class PreRegistrationValidationRequest(BaseModel):
+    student_number: str
+    passkey_code: str
+
+
 class ProfileResponse(BaseModel):
     """Returned by GET /authentication/me."""
     account_id: int

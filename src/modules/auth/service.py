@@ -330,3 +330,40 @@ def process_user_registration(
         account_role=saved_account.account_role,
         account_id=saved_account.account_id,
     )
+
+
+def validate_pre_registration(
+    database_session: Session,
+    data: schemas.PreRegistrationValidationRequest,
+) -> bool:
+    """
+    Checks if the passkey is correct and the student number is not already registered.
+    Used on the Landing Page to prevent random access.
+    """
+    # 1. Passkey Check
+    try:
+        active_passkey = get_active_passkey(database_session=database_session)
+    except HTTPException:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="System settings not initialized. Contact Admin.",
+        )
+
+    if data.passkey_code != active_passkey:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid system passkey. Access denied.",
+        )
+
+    # 2. Student Number Check
+    existing_profile = database_session.query(StudentProfile).filter(
+        StudentProfile.student_number == data.student_number
+    ).first()
+
+    if existing_profile:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This student number is already registered or in use.",
+        )
+
+    return True
