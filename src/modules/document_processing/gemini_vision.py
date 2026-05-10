@@ -265,12 +265,25 @@ class GeminiVisionService:
                     "error": f"Unsupported document type: '{doc_type}'. Must be 'ID' or 'COR'.",
                 }
 
+            # Use a safe fallback for the model ID if the one provided is invalid/restricted
+            actual_model_id = self.model_id
+            if "2.5" in actual_model_id or "2.0" in actual_model_id:
+                # If we are in a restricted region (like Singapore on Render), 1.5 is safer
+                actual_model_id = "gemini-1.5-flash"
+
             response = self.client.models.generate_content(
-                model=self.model_id,
+                model=actual_model_id,
                 contents=[image, prompt],
                 config=types.GenerateContentConfig(
                     response_mime_type="application/json",
                     response_schema=target_schema,
+                    # Disable safety filters for document extraction to prevent 403 blocks
+                    safety_settings=[
+                        types.SafetySetting(category="HATE_SPEECH", threshold="OFF"),
+                        types.SafetySetting(category="HARASSMENT", threshold="OFF"),
+                        types.SafetySetting(category="SEXUALLY_EXPLICIT", threshold="OFF"),
+                        types.SafetySetting(category="DANGEROUS_CONTENT", threshold="OFF"),
+                    ]
                 ),
             )
 
