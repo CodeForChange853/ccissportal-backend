@@ -709,7 +709,21 @@ def create_student_consultation_request(
     database_session.add(new_request)
     database_session.commit()
     database_session.refresh(new_request)
-    return new_request
+    
+    from src.modules.faculty.models import FacultyProfile
+    profile = database_session.query(FacultyProfile).filter(FacultyProfile.faculty_account_id == booking_data.faculty_account_id).first()
+    faculty_name = f"{profile.first_name} {profile.last_name}" if profile else "Unknown Faculty"
+    
+    return {
+        "request_id": new_request.request_id,
+        "faculty_name": faculty_name,
+        "reason": new_request.reason,
+        "booking_date": new_request.booking_date,
+        "start_time": new_request.start_time,
+        "end_time": new_request.end_time,
+        "status": new_request.status,
+        "created_at": new_request.created_at.isoformat() if new_request.created_at else None,
+    }
 
 def get_student_consultation_requests(
     database_session: Session,

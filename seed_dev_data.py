@@ -17,7 +17,7 @@ pwd = CryptContext(schemes=["bcrypt"], deprecated="auto")
  
 # ── helpers 
  
-def _get_or_create_user(db, email: str, role: str, password: str = "Test1234!") -> UserAccount:
+def _get_or_create_user(db, email: str, role: str, password: str = "password123") -> UserAccount:
     existing = db.query(UserAccount).filter(UserAccount.email_address == email).first()
     if existing:
         return existing
