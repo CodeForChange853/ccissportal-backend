@@ -265,27 +265,39 @@ class GeminiVisionService:
                     "error": f"Unsupported document type: '{doc_type}'. Must be 'ID' or 'COR'.",
                 }
 
-            # Use a safe fallback for the model ID if the one provided is invalid/restricted
-            actual_model_id = self.model_id
-            if "2.5" in actual_model_id or "2.0" in actual_model_id:
-                # If we are in a restricted region (like Singapore on Render), 1.5 is safer
-                actual_model_id = "gemini-1.5-flash"
-
-            response = self.client.models.generate_content(
-                model=actual_model_id,
-                contents=[image, prompt],
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=target_schema,
-                    # Disable safety filters for document extraction to prevent 403 blocks
-                    safety_settings=[
-                        types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                        types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-                    ]
-                ),
-            )
+            # Primary attempt using the model ID from settings
+            try:
+                response = self.client.models.generate_content(
+                    model=self.model_id,
+                    contents=[image, prompt],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=target_schema,
+                        safety_settings=[
+                            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+                        ]
+                    ),
+                )
+            except Exception as e:
+                # If the primary model fails (e.g. 404 or location error), try the most stable one as a last resort
+                print(f"⚠️ Primary model {self.model_id} failed: {str(e)}. Attempting fallback...")
+                response = self.client.models.generate_content(
+                    model="gemini-2.0-flash",
+                    contents=[image, prompt],
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=target_schema,
+                        safety_settings=[
+                            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+                        ]
+                    ),
+                )
 
             if not response.parsed:
                 return {
