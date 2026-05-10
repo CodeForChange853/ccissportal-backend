@@ -1,5 +1,6 @@
 # backend-v2/src/modules/faculty/models.py
-from sqlalchemy import Column, Integer, String, Float, ForeignKey, Boolean, Index
+from sqlalchemy import Column, Integer, String, Float, ForeignKey, Boolean, Index, DateTime, Text
+from sqlalchemy.sql import func
 from src.core.database_setup import Base
 
 
@@ -61,3 +62,42 @@ class GradebookEntry(Base):
             "curriculum_subject_id",
         ),
     )
+
+
+class ConsultationSlot(Base):
+    __tablename__ = "consultation_slots"
+
+    slot_id = Column(Integer, primary_key=True, index=True)
+    faculty_account_id = Column(
+        Integer, ForeignKey("user_accounts.account_id"),
+        index=True, nullable=False
+    )
+    available_date = Column(String(20), nullable=False)   
+    start_time  = Column(String(10), nullable=False)  
+    end_time    = Column(String(10), nullable=False)   
+    is_active   = Column(Boolean, default=True)
+    created_at  = Column(DateTime(timezone=True), server_default=func.now())
+
+
+class ConsultationRequest(Base):
+    __tablename__ = "consultation_requests"
+
+    request_id = Column(Integer, primary_key=True, index=True)
+    slot_id = Column(
+        Integer, ForeignKey("consultation_slots.slot_id"),
+        index=True, nullable=False
+    )
+    student_account_id = Column(
+        Integer, ForeignKey("user_accounts.account_id"),
+        index=True, nullable=False
+    )
+    faculty_account_id = Column(
+        Integer, ForeignKey("user_accounts.account_id"),
+        index=True, nullable=False
+    )
+    reason = Column(Text, nullable=False)
+    booking_date = Column(String(20), nullable=False)
+    start_time = Column(String(10), nullable=False)
+    end_time = Column(String(10), nullable=False)
+    status = Column(String(20), default="PENDING", index=True)  
+    created_at = Column(DateTime(timezone=True), server_default=func.now())

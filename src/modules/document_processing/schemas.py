@@ -11,8 +11,8 @@ class ScanInitiationResponse(BaseModel):
 class ScanStatusReport(BaseModel):
     
     processing_status:  str
-    extracted_ai_data:  Optional[str]   = None   # full JSON payload from Gemini
-    confidence_score:   Optional[float] = None   # top-level quick access
+    extracted_ai_data:  Optional[str]   = None 
+    confidence_score:   Optional[float] = None   
     error_message:      Optional[str]   = None
 
     class Config:

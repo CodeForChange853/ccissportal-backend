@@ -1,10 +1,10 @@
 # backend-v2/src/modules/support/service.py
 
-
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
 
 from . import repository, schemas, models
+from .models import SupportTicket
 from .ml.triage_engine import SupportTriageEngine
 
 triage_ai = SupportTriageEngine()
@@ -22,7 +22,6 @@ def process_new_support_ticket(
 
     combined_text = f"{ticket_data.issue_subject} {ticket_data.issue_description}"
 
-
     predicted_department, confidence_score = triage_ai.predict_with_confidence(combined_text)
 
     new_ticket = models.SupportTicket(
@@ -30,8 +29,8 @@ def process_new_support_ticket(
         issue_subject=ticket_data.issue_subject,
         issue_description=ticket_data.issue_description,
         ai_predicted_category=predicted_department,
-        confidence_score=confidence_score,  
-        was_manually_rerouted=False,       
+        confidence_score=confidence_score,
+        was_manually_rerouted=False,
         ticket_status="OPEN",
     )
 
@@ -49,8 +48,11 @@ def process_ticket_reroute(
     database_session: Session,
     ticket_id: int,
     reroute_data: schemas.RerouteTicketRequest,
+    actor_id: int | None = None,      # Added to align with router call
+    actor_email: str | None = None,   # Added to align with router call
+    ip_address: str | None = None,    # Added to align with router call
 ) -> models.SupportTicket:
- 
+
     ticket = repository.fetch_ticket_by_id(
         database_session=database_session,
         ticket_id=ticket_id,
@@ -83,7 +85,7 @@ def process_ticket_reroute(
 def fetch_telemetry_data(
     database_session: Session,
 ) -> schemas.TelemetryStatsResponse:
-  
+
     from sqlalchemy import func as sql_func
 
     total_tickets = database_session.query(
@@ -131,6 +133,7 @@ def fetch_telemetry_data(
         average_confidence=average_confidence,
     )
 
+
 # Admin-facing — Model Retraining
 
 def trigger_model_retrain(
@@ -141,13 +144,12 @@ def trigger_model_retrain(
         database_session=database_session,
     )
 
-
     training_texts = [
         f"{t.issue_subject} {t.issue_description}"
         for t in labeled_tickets
     ]
     training_labels = [
-        t.ai_predicted_category  
+        t.ai_predicted_category
         for t in labeled_tickets
     ]
 
@@ -156,4 +158,4 @@ def trigger_model_retrain(
         training_labels=training_labels,
     )
 
-    return schemas.RetrainResultResponse(**result)
+    return schemas.RetrainResultResponse(**result)

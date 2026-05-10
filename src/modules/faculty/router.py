@@ -43,7 +43,6 @@ def assign_class_to_professor(
     database_session: Session = Depends(get_database_session),
     admin: UserAccount = Depends(require_admin),
 ):
-    # Existing logic remains exactly as is
     updated_profile = service.evaluate_and_assign_faculty_load(
         database_session=database_session,
         assignment_data=assignment_data,
@@ -134,6 +133,102 @@ def batch_sync_grades(
     }
 
 
+# ── TRIAGE ALERTS ──
+
+@faculty_router.get("/faculty/triage-alerts", response_model=List[schemas.TriageAlertOut])
+def get_triage_alerts(
+    database_session: Session = Depends(get_database_session),
+    current_faculty: UserAccount = Depends(require_faculty),
+):
+    return service.fetch_triage_alerts(
+        database_session=database_session,
+        faculty_account_id=current_faculty.account_id,
+    )
+
+
+# ── CONSULTATION SLOTS ──
+
+@faculty_router.get("/faculty/consultations/slots", response_model=List[schemas.ConsultationSlotOut])
+def list_my_consultation_slots(
+    database_session: Session = Depends(get_database_session),
+    current_faculty: UserAccount = Depends(require_faculty),
+):
+    return service.get_consultation_slots(
+        database_session=database_session,
+        faculty_account_id=current_faculty.account_id,
+    )
+
+
+@faculty_router.post("/faculty/consultations/slots", response_model=schemas.ConsultationSlotOut)
+def add_consultation_slot(
+    slot_data: schemas.ConsultationSlotCreate,
+    database_session: Session = Depends(get_database_session),
+    current_faculty: UserAccount = Depends(require_faculty),
+):
+    return service.create_consultation_slot(
+        database_session=database_session,
+        faculty_account_id=current_faculty.account_id,
+        slot_data=slot_data,
+    )
+
+
+@faculty_router.delete("/faculty/consultations/slots/{slot_id}")
+def remove_consultation_slot(
+    slot_id: int,
+    database_session: Session = Depends(get_database_session),
+    current_faculty: UserAccount = Depends(require_faculty),
+):
+    service.delete_consultation_slot(
+        database_session=database_session,
+        faculty_account_id=current_faculty.account_id,
+        slot_id=slot_id,
+    )
+    return {"message": "Slot deleted."}
+
+@faculty_router.put("/faculty/consultations/slots/{slot_id}", response_model=schemas.ConsultationSlotOut)
+def update_consultation_slot(
+    slot_id: int,
+    slot_data: schemas.ConsultationSlotUpdate,
+    database_session: Session = Depends(get_database_session),
+    current_faculty: UserAccount = Depends(require_faculty),
+):
+    return service.update_consultation_slot(
+        database_session=database_session,
+        faculty_account_id=current_faculty.account_id,
+        slot_id=slot_id,
+        slot_data=slot_data,
+    )
+
+
+# ── CONSULTATION REQUESTS ──
+
+@faculty_router.get("/faculty/consultations/requests", response_model=List[schemas.ConsultationRequestOut])
+def list_consultation_requests(
+    database_session: Session = Depends(get_database_session),
+    current_faculty: UserAccount = Depends(require_faculty),
+):
+    return service.get_consultation_requests(
+        database_session=database_session,
+        faculty_account_id=current_faculty.account_id,
+    )
+
+
+@faculty_router.put("/faculty/consultations/requests/{request_id}/status")
+def update_request_status(
+    request_id: int,
+    body: schemas.ConsultationStatusUpdate,
+    database_session: Session = Depends(get_database_session),
+    current_faculty: UserAccount = Depends(require_faculty),
+):
+    service.update_consultation_request_status(
+        database_session=database_session,
+        faculty_account_id=current_faculty.account_id,
+        request_id=request_id,
+        new_status=body.status,
+    )
+    return {"message": f"Request {request_id} marked as {body.status}."}
+
+
 # STUDENT ROUTES
 @faculty_router.get("/student/my-grades", response_model=List[schemas.StudentGradeReport])
 def view_my_student_transcript(
@@ -144,4 +239,46 @@ def view_my_student_transcript(
     return repository.fetch_student_transcript_with_subjects(
         database_session=database_session,
         target_student_id=current_user.account_id,
+    )
+
+@faculty_router.get("/student/consultations/faculty", response_model=List[schemas.FacultyWithSlotsOut])
+def get_available_faculty(
+    database_session: Session = Depends(get_database_session),
+    current_user: UserAccount = Depends(get_current_user),
+):
+    return service.get_faculty_for_consultation(database_session=database_session)
+
+@faculty_router.get("/student/consultations/faculty/{faculty_id}/available-slots", response_model=List[schemas.AvailableTimeChunk])
+def get_faculty_time_chunks(
+    faculty_id: int,
+    target_date: str,
+    database_session: Session = Depends(get_database_session),
+    current_user: UserAccount = Depends(get_current_user),
+):
+    return service.generate_available_30min_chunks(
+        database_session=database_session,
+        faculty_account_id=faculty_id,
+        target_date=target_date
+    )
+
+@faculty_router.post("/student/consultations/requests", response_model=schemas.ConsultationRequestOut)
+def submit_student_consultation_booking(
+    booking_data: schemas.StudentConsultationBookingCreate,
+    database_session: Session = Depends(get_database_session),
+    current_user: UserAccount = Depends(get_current_user),
+):
+    return service.create_student_consultation_request(
+        database_session=database_session,
+        student_account_id=current_user.account_id,
+        booking_data=booking_data
+    )
+
+@faculty_router.get("/student/consultations/requests", response_model=List[schemas.ConsultationRequestOut])
+def list_my_consultation_bookings(
+    database_session: Session = Depends(get_database_session),
+    current_user: UserAccount = Depends(get_current_user),
+):
+    return service.get_student_consultation_requests(
+        database_session=database_session,
+        student_account_id=current_user.account_id
     )

@@ -435,7 +435,7 @@ EXTRA_GRADES = [
     (4, ["CS 301", "CS 302", "CS 303"], "IN PROGRESS", 2.00, None),
 ]
  
-def seed_gradebook(db, student_accounts: list[UserAccount], admin_account: UserAccount) -> None:
+def seed_gradebook(db, student_accounts: list[UserAccount], faculty_accounts: list[UserAccount]) -> None:
     # Get subject code → id mapping
     code_to_id: dict[str, int] = {
         s.subject_code: s.subject_id
@@ -463,7 +463,7 @@ def seed_gradebook(db, student_accounts: list[UserAccount], admin_account: UserA
  
             db.add(GradebookEntry(
                 student_account_id=student.account_id,
-                faculty_account_id=admin_account.account_id,
+                faculty_account_id=faculty_accounts[0].account_id,
                 curriculum_subject_id=sid,
                 midterm_grade=midterm,
                 final_grade=final_grade,
@@ -483,9 +483,9 @@ def seed_gradebook(db, student_accounts: list[UserAccount], admin_account: UserA
 # ══════════════════════════════════════════════════════════════════════════════
  
 def main():
-    print("\n" + "═" * 62)
-    print("  NexEnroll Dev Data Seeder — lighting up all frontend graphs")
-    print("═" * 62)
+    print("\n" + "=" * 62)
+    print("  NexEnroll Dev Data Seeder - lighting up all frontend graphs")
+    print("=" * 62)
  
     db = SessionLocal()
     try:
@@ -494,7 +494,7 @@ def main():
             UserAccount.email_address == "admin@university.edu"
         ).first()
         if admin is None:
-            print("\n❌  Admin account not found.")
+            print("\n[ERROR]  Admin account not found.")
             print("    Run seed_database.py first, then re-run this script.\n")
             return
  
@@ -514,52 +514,52 @@ def main():
         seed_enrollment_requests(db, student_accounts)
  
         print("\n[6/6] Seeding gradebook entries...")
-        seed_gradebook(db, student_accounts, admin)
+        seed_gradebook(db, student_accounts, faculty_accounts)
  
         db.commit()
  
-        print("\n" + "═" * 62)
-        print("  ✅  Dev data seeded successfully!")
-        print("═" * 62)
+        print("\n" + "=" * 62)
+        print("  [SUCCESS]  Dev data seeded successfully!")
+        print("=" * 62)
         print("""
 WHAT TO EXPECT IN THE FRONTEND
-───────────────────────────────────────────────────────────────
+---------------------------------------------------------------
   AdminOverview KPI strip:
-    • Total Students: 9+ (original test student + 8 new)
-    • Total Faculty:  5  (loads: 4/4 · 3/4 · 2/4 · 1/4 · 0/4)
-    • Pending Enrollments: 5
+    * Total Students: 9+ (original test student + 8 new)
+    * Total Faculty:  5  (loads: 4/4 - 3/4 - 2/4 - 1/4 - 0/4)
+    * Pending Enrollments: 5
  
   RadarScanner:
-    • 5 cyan blips   → PENDING enrollment requests
-    • 4 red/orange blips → OPEN IT SUPPORT + FINANCE tickets
+    * 5 cyan blips   -> PENDING enrollment requests
+    * 4 red/orange blips -> OPEN IT SUPPORT + FINANCE tickets
  
   AlertFeed:
-    • OPEN tickets from all 4 departments — live severity feed
+    * OPEN tickets from all 4 departments - live severity feed
  
   SignalChart (Neural Confidence Trend):
-    • 30-point line — values range 41 % → 97 %
-    • NOTE: requires the AdminTicketResponse schema fix below!
+    * 30-point line - values range 41 % -> 97 %
+    * NOTE: requires the AdminTicketResponse schema fix below!
  
   ActivityGraph (Triage Activity Map):
-    • IT SUPPORT:       8 tickets   (cyan)
-    • REGISTRAR:        8 tickets   (purple)
-    • FINANCE:          7 tickets   (orange)
-    • ACADEMIC AFFAIRS: 7 tickets   (green)
+    * IT SUPPORT:       8 tickets   (cyan)
+    * REGISTRAR:        8 tickets   (purple)
+    * FINANCE:          7 tickets   (orange)
+    * ACADEMIC AFFAIRS: 7 tickets   (green)
  
   Faculty Load Status sidebar:
-    • Santos — FULL  (4/4)
-    • Reyes  — HIGH  (3/4)
-    • Cruz   — OK    (2/4)
-    • Others — OK / AVAILABLE
+    * Santos - FULL  (4/4)
+    * Reyes  - HIGH  (3/4)
+    * Cruz   - OK    (2/4)
+    * Others - OK / AVAILABLE
  
   AuditIntelligence (AnomalyGauge):
-    • 60 events including 6 HIGH-RISK (score 75) off-hours entries
-    • IsolationForest fires → gauge shows elevated score
-    • Top anomalies section populated with GRADE_MODIFIED +
+    * 60 events including 6 HIGH-RISK (score 75) off-hours entries
+    * IsolationForest fires -> gauge shows elevated score
+    * Top anomalies section populated with GRADE_MODIFIED +
       PASSKEY_ROTATED + USER_SUSPENDED entries
  
-───────────────────────────────────────────────────────────────
-⚠  REQUIRED BACKEND FIX — SignalChart will be empty without this:
+---------------------------------------------------------------
+REQUIRED BACKEND FIX - SignalChart will be empty without this:
  
   File: backend-v2/src/modules/support/schemas.py
   Reason: AdminTicketResponse is missing confidence_score and
@@ -586,10 +586,10 @@ WHAT TO EXPECT IN THE FRONTEND
         was_manually_rerouted: bool = False
         ticket_status: str
         created_at: Optional[datetime] = None
-───────────────────────────────────────────────────────────────
+---------------------------------------------------------------
 """)
     except Exception as err:
-        print(f"\n❌  Seeding error: {err}")
+        print(f"\n[ERROR]  Seeding error: {err}")
         import traceback
         traceback.print_exc()
         db.rollback()

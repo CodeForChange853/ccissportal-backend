@@ -21,7 +21,12 @@ class SystemSettings(Base):
 
     student_registration_passkey = Column(String(100), nullable=False, default="CCIS2025")
 
-    #  Audit 
+    # Maintenance Mode 
+    is_maintenance_mode = Column(Boolean, nullable=False, default=False)
+    maintenance_reason = Column(String(255), nullable=True)
+    maintenance_message = Column(String(500), nullable=True)
+
+    # Audit 
     last_updated_at = Column(
         DateTime(timezone=True),
         server_default=func.now(),

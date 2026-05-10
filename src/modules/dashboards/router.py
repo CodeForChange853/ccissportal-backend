@@ -139,15 +139,12 @@ def get_student_academic_standing(
     def to_grade_records(records: list) -> list[schemas.GradeRecord]:
         return [schemas.GradeRecord(**r) for r in records]
 
-    # Safely access a field from either a dataclass/object or a plain dict.
-    # PrerequisiteChecker may return a RecommendationResult dataclass or a
-    # dict depending on internal code path — this prevents AttributeError.
+    
     def _safe_get(obj, key, default=None):
         if isinstance(obj, dict):
             return obj.get(key, default)
         return getattr(obj, key, default)
 
-    # Convert RecommendationResult (dataclass or dict) to NextSemesterRecommendation schema
     rec = standing["next_semester_recommendation"]
 
     raw_subject_results = _safe_get(rec, "subject_results", [])
@@ -207,10 +204,7 @@ def omni_search(
     term = f"%{search_query}%"
     results = []
 
-    # Search students by email, name, or student number
-    # NOTE: No per-query .limit() — all matches are collected first, then
-    # the combined results list is capped at 15 to avoid hiding users with
-    # common names that would be silently dropped by a premature limit(5).
+
     matched_students = (
         database_session.query(UserAccount, StudentProfile)
         .join(StudentProfile, StudentProfile.student_account_id == UserAccount.account_id)
@@ -429,3 +423,91 @@ def update_user_active_status(
 
     action = "activated" if status_data.is_active else "deactivated"
     return {"message": f"Account {target_user.email_address} {action} successfully."}
+
+
+# ── STUDENT SCHEDULE 
+
+@dashboards_router.get("/student/schedule")
+def get_student_schedule(
+    database_session: Session = Depends(get_database_session),
+    current_user: UserAccount = Depends(get_current_user),
+):
+    
+    if current_user.account_role != "STUDENT":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint is for students only.",
+        )
+
+    from src.modules.faculty.models import GradebookEntry, FacultyProfile
+    from src.modules.enrollment.models import CurriculumSubject
+
+    rows = (
+        database_session.query(GradebookEntry, CurriculumSubject, FacultyProfile)
+        .join(
+            CurriculumSubject,
+            GradebookEntry.curriculum_subject_id == CurriculumSubject.subject_id,
+        )
+        .outerjoin(
+            FacultyProfile,
+            GradebookEntry.faculty_account_id == FacultyProfile.faculty_account_id,
+        )
+        .filter(
+            GradebookEntry.student_account_id == current_user.account_id,
+            GradebookEntry.completion_status.in_(["ENROLLED", "IN PROGRESS"]),
+        )
+        .all()
+    )
+
+    schedule = []
+    for entry, subject, faculty in rows:
+        instructor_name = (
+            f"{faculty.first_name} {faculty.last_name}".strip()
+            if faculty else "TBA"
+        )
+        schedule.append({
+            "code":       subject.subject_code,
+            "title":      subject.subject_title,
+            "units":      subject.credit_units,
+            "time":       "TBA",
+            "room":       "TBA",
+            "instructor": instructor_name,
+        })
+
+    return schedule
+
+
+# ── STUDENT ENROLLMENT STATUS 
+
+@dashboards_router.get("/student/enrollment-status")
+def get_student_enrollment_status(
+    database_session: Session = Depends(get_database_session),
+    current_user: UserAccount = Depends(get_current_user),
+):
+    """
+    Returns the student's enrollment request history for the Status tab.
+    """
+    if current_user.account_role != "STUDENT":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint is for students only.",
+        )
+
+    requests = (
+        database_session.query(StudentEnrollmentRequest)
+        .filter(StudentEnrollmentRequest.student_account_id == current_user.account_id)
+        .order_by(StudentEnrollmentRequest.date_submitted.desc())
+        .all()
+    )
+
+    return [
+        {
+            "request_id":         req.request_id,
+            "target_year_level":  req.target_year_level,
+            "target_semester":    req.target_semester,
+            "review_status":      req.review_status,
+            "admin_review_notes": req.admin_review_notes,
+            "date_submitted":     req.date_submitted.isoformat() if req.date_submitted else None,
+        }
+        for req in requests
+    ]

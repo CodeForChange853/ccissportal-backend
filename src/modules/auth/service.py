@@ -83,6 +83,28 @@ def process_user_login(
             detail="The password provided is incorrect.",
         )
 
+    # --- MAINTENANCE LOCK: Reject non-admins if system is locked ---
+    from src.modules.settings.models import SystemSettings
+    sys_settings = database_session.query(SystemSettings).filter(SystemSettings.settings_id == 1).first()
+    if sys_settings and sys_settings.is_maintenance_mode:
+        if user_account.account_role != "ADMIN":
+            audit_service.log_event(
+                database_session=database_session,
+                event_type="LOGIN_BLOCKED_MAINTENANCE",
+                actor_id=user_account.account_id,
+                actor_email=user_account.email_address,
+                ip_address=ip_address,
+                payload={"role": user_account.account_role},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail={
+                    "maintenance": True,
+                    "reason": sys_settings.maintenance_reason or "Neural Infrastructure Recalibration",
+                    "message": sys_settings.maintenance_message or "The NexEnroll AI Core is currently undergoing deep-layer synchronization to optimize semestral load balancing and ensure total data integrity. We are evolving to provide you with a faster, more intelligent academic journey."
+                }
+            )
+
 
     secure_access_token = create_secure_access_token(
         data={

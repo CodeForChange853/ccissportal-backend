@@ -279,17 +279,7 @@ def sync_offline_grades(
     actor_email: str,
     ip_address: str
 ) -> dict:
-    """
-    Sync offline grade edits with last-write-wins conflict resolution.
-
-    For each update, we check the audit log for the most recent server-side
-    GRADE_MODIFIED event targeting the same (student, subject) pair.
-    If the client's timestamp is older than the server's last write,
-    the update is skipped as stale — preventing data collision when
-    multiple devices sync concurrently.
-
-    Returns a dict with synced_count, skipped_count, and skipped_keys.
-    """
+   
     synced_count = 0
     skipped_count = 0
     skipped_keys = []
@@ -299,7 +289,6 @@ def sync_offline_grades(
     from datetime import datetime, timezone
 
     for update in sync_data.updates:
-        # ── Step 1: Resolve subject ID from code if needed ──
         subject_id = update.curriculum_subject_id
         if not subject_id and update.subject_code:
             subj = database_session.query(CurriculumSubject).filter(
@@ -311,11 +300,9 @@ def sync_offline_grades(
         if not subject_id:
             continue
 
-        # ── Step 2: Last-write-wins conflict check ──
         composite_key = f"{update.student_account_id}__{subject_id}"
 
         if update.client_updated_at is not None:
-            # Find the most recent server-side grade modification for this pair
             last_server_write = (
                 database_session.query(AuditEvent)
                 .filter(
@@ -328,13 +315,11 @@ def sync_offline_grades(
             )
 
             if last_server_write and last_server_write.created_at:
-                # Convert server timestamp to epoch-ms for comparison
                 server_ts = last_server_write.created_at
                 if server_ts.tzinfo is None:
                     server_ts = server_ts.replace(tzinfo=timezone.utc)
                 server_epoch_ms = int(server_ts.timestamp() * 1000)
 
-                # Also verify the audit payload matches this specific subject
                 import json
                 try:
                     audit_payload = json.loads(last_server_write.payload) if isinstance(last_server_write.payload, str) else (last_server_write.payload or {})
@@ -344,12 +329,9 @@ def sync_offline_grades(
                 audit_subject_id = audit_payload.get("subject_id")
 
                 if audit_subject_id == subject_id and update.client_updated_at < server_epoch_ms:
-                    # Client edit is older than the last server write — skip as stale
                     skipped_count += 1
                     skipped_keys.append(composite_key)
                     continue
-
-        # ── Step 3: Apply the grade update ──
         try:
             update.curriculum_subject_id = subject_id
             securely_update_student_grade(
@@ -361,10 +343,399 @@ def sync_offline_grades(
             )
             synced_count += 1
         except HTTPException:
-            pass  # Skip invalid edits during bulk sync
+            pass 
 
     return {
         "synced_count": synced_count,
         "skipped_count": skipped_count,
         "skipped_keys": skipped_keys,
     }
+
+
+# ── Triage Alerts 
+
+def fetch_triage_alerts(
+    database_session: Session,
+    faculty_account_id: int,
+) -> list[dict]:
+    
+    from src.modules.enrollment.models import CurriculumSubject, StudentProfile
+    from src.modules.auth.models import UserAccount
+    from src.modules.support.models import SupportTicket
+
+    alerts: list[dict] = []
+
+    failing_rows = (
+        database_session.query(models.GradebookEntry, CurriculumSubject, StudentProfile)
+        .join(CurriculumSubject, models.GradebookEntry.curriculum_subject_id == CurriculumSubject.subject_id)
+        .outerjoin(StudentProfile, models.GradebookEntry.student_account_id == StudentProfile.student_account_id)
+        .filter(
+            models.GradebookEntry.faculty_account_id == faculty_account_id,
+            models.GradebookEntry.student_account_id != None,
+        )
+        .all()
+    )
+
+    for grade, subject, profile in failing_rows:
+        sys_g = grade.system_grade or 0
+        fin_g = grade.final_grade or 0
+        if sys_g >= 3.0 or fin_g >= 3.0:
+            student_name = f"{profile.first_name} {profile.last_name}" if profile else "Unknown"
+            alerts.append({
+                "alert_type": "ADVISING",
+                "severity": "warning",
+                "title": "Advising Alert",
+                "description": f"{student_name} is at risk of failing {subject.subject_code} — {subject.subject_title}.",
+                "subject_code": subject.subject_code,
+                "student_name": student_name,
+                "ticket_id": None,
+            })
+
+    taught_subject_ids = (
+        database_session.query(models.GradebookEntry.curriculum_subject_id)
+        .filter(models.GradebookEntry.faculty_account_id == faculty_account_id)
+        .distinct()
+        .all()
+    )
+    taught_ids = [row[0] for row in taught_subject_ids]
+
+    if taught_ids:
+        student_ids_under_faculty = (
+            database_session.query(models.GradebookEntry.student_account_id)
+            .filter(
+                models.GradebookEntry.faculty_account_id == faculty_account_id,
+                models.GradebookEntry.student_account_id != None,
+            )
+            .distinct()
+            .all()
+        )
+        student_ids = [row[0] for row in student_ids_under_faculty]
+
+        if student_ids:
+            open_tickets = (
+                database_session.query(SupportTicket, StudentProfile)
+                .outerjoin(StudentProfile, SupportTicket.student_account_id == StudentProfile.student_account_id)
+                .filter(
+                    SupportTicket.student_account_id.in_(student_ids),
+                    SupportTicket.ticket_status == "OPEN",
+                    SupportTicket.ai_predicted_category.ilike("%grade%"),
+                )
+                .all()
+            )
+
+            for ticket, profile in open_tickets:
+                student_name = f"{profile.first_name} {profile.last_name}" if profile else "Unknown"
+                alerts.append({
+                    "alert_type": "GRADE_DISPUTE",
+                    "severity": "critical",
+                    "title": "Grade Rectification",
+                    "description": f"{student_name} filed a dispute: {ticket.issue_subject}",
+                    "subject_code": None,
+                    "student_name": student_name,
+                    "ticket_id": ticket.ticket_id,
+                })
+
+    return alerts
+
+
+# ── Consultation Slots 
+
+def get_consultation_slots(
+    database_session: Session,
+    faculty_account_id: int,
+) -> list[models.ConsultationSlot]:
+    return (
+        database_session.query(models.ConsultationSlot)
+        .filter(models.ConsultationSlot.faculty_account_id == faculty_account_id)
+        .order_by(models.ConsultationSlot.slot_id)
+        .all()
+    )
+
+
+def create_consultation_slot(
+    database_session: Session,
+    faculty_account_id: int,
+    slot_data: schemas.ConsultationSlotCreate,
+) -> models.ConsultationSlot:
+    new_slot = models.ConsultationSlot(
+        faculty_account_id=faculty_account_id,
+        available_date=slot_data.available_date,
+        start_time=slot_data.start_time,
+        end_time=slot_data.end_time,
+    )
+    database_session.add(new_slot)
+    database_session.commit()
+    database_session.refresh(new_slot)
+    return new_slot
+
+
+def delete_consultation_slot(
+    database_session: Session,
+    faculty_account_id: int,
+    slot_id: int,
+) -> None:
+    slot = (
+        database_session.query(models.ConsultationSlot)
+        .filter(
+            models.ConsultationSlot.slot_id == slot_id,
+            models.ConsultationSlot.faculty_account_id == faculty_account_id,
+        )
+        .first()
+    )
+    if not slot:
+        raise HTTPException(status_code=404, detail="Slot not found.")
+    database_session.delete(slot)
+    database_session.commit()
+
+def update_consultation_slot(
+    database_session: Session,
+    faculty_account_id: int,
+    slot_id: int,
+    slot_data: schemas.ConsultationSlotUpdate,
+) -> models.ConsultationSlot:
+    slot = (
+        database_session.query(models.ConsultationSlot)
+        .filter(
+            models.ConsultationSlot.slot_id == slot_id,
+            models.ConsultationSlot.faculty_account_id == faculty_account_id,
+        )
+        .first()
+    )
+    if not slot:
+        raise HTTPException(status_code=404, detail="Slot not found.")
+    
+    if slot_data.available_date is not None:
+        slot.available_date = slot_data.available_date
+    if slot_data.start_time is not None:
+        slot.start_time = slot_data.start_time
+    if slot_data.end_time is not None:
+        slot.end_time = slot_data.end_time
+    if slot_data.is_active is not None:
+        slot.is_active = slot_data.is_active
+
+    database_session.commit()
+    database_session.refresh(slot)
+    return slot
+
+
+# ── Consultation Requests 
+
+def get_consultation_requests(
+    database_session: Session,
+    faculty_account_id: int,
+) -> list[dict]:
+    from src.modules.enrollment.models import StudentProfile
+
+    rows = (
+        database_session.query(models.ConsultationRequest, StudentProfile)
+        .outerjoin(StudentProfile, models.ConsultationRequest.student_account_id == StudentProfile.student_account_id)
+        .filter(models.ConsultationRequest.faculty_account_id == faculty_account_id)
+        .order_by(models.ConsultationRequest.created_at.desc())
+        .all()
+    )
+
+    result = []
+    for req, profile in rows:
+        student_name = f"{profile.first_name} {profile.last_name}" if profile else "Unknown Student"
+        result.append({
+            "request_id": req.request_id,
+            "student_name": student_name,
+            "reason": req.reason,
+            "booking_date": req.booking_date,
+            "start_time": req.start_time,
+            "end_time": req.end_time,
+            "status": req.status,
+            "created_at": req.created_at.isoformat() if req.created_at else None,
+        })
+    return result
+
+
+def update_consultation_request_status(
+    database_session: Session,
+    faculty_account_id: int,
+    request_id: int,
+    new_status: str,
+) -> models.ConsultationRequest:
+    if new_status not in ("APPROVED", "DECLINED"):
+        raise HTTPException(status_code=400, detail="Status must be APPROVED or DECLINED.")
+
+    req = (
+        database_session.query(models.ConsultationRequest)
+        .filter(
+            models.ConsultationRequest.request_id == request_id,
+            models.ConsultationRequest.faculty_account_id == faculty_account_id,
+        )
+        .first()
+    )
+    if not req:
+        raise HTTPException(status_code=404, detail="Consultation request not found.")
+
+    req.status = new_status
+    database_session.commit()
+    database_session.refresh(req)
+    return req
+
+# ── Student Consultation Features ──
+
+def get_faculty_for_consultation(database_session: Session) -> list[dict]:
+    from src.modules.faculty.models import FacultyProfile, ConsultationSlot
+    
+    rows = (
+        database_session.query(FacultyProfile)
+        .join(ConsultationSlot, FacultyProfile.faculty_account_id == ConsultationSlot.faculty_account_id)
+        .filter(ConsultationSlot.is_active == True)
+        .distinct()
+        .all()
+    )
+    
+    return [
+        {
+            "account_id": p.faculty_account_id,
+            "faculty_name": f"{p.first_name} {p.last_name}",
+            "academic_department": p.academic_department
+        }
+        for p in rows
+    ]
+
+def generate_available_30min_chunks(
+    database_session: Session,
+    faculty_account_id: int,
+    target_date: str
+) -> list[dict]:
+    import datetime
+    
+    slots = (
+        database_session.query(models.ConsultationSlot)
+        .filter(
+            models.ConsultationSlot.faculty_account_id == faculty_account_id,
+            models.ConsultationSlot.available_date == target_date,
+            models.ConsultationSlot.is_active == True
+        )
+        .all()
+    )
+
+    if not slots:
+        return []
+
+    # Get existing requests to block off booked slots
+    existing_requests = (
+        database_session.query(models.ConsultationRequest)
+        .filter(
+            models.ConsultationRequest.faculty_account_id == faculty_account_id,
+            models.ConsultationRequest.booking_date == target_date,
+            models.ConsultationRequest.status.in_(["PENDING", "APPROVED"])
+        )
+        .all()
+    )
+    
+    booked_times = {(req.start_time, req.end_time) for req in existing_requests}
+
+    available_chunks = []
+    
+    for slot in slots:
+        try:
+            start_dt = datetime.datetime.strptime(slot.start_time, "%H:%M")
+            end_dt = datetime.datetime.strptime(slot.end_time, "%H:%M")
+        except ValueError:
+            continue
+            
+        current_dt = start_dt
+        while current_dt + datetime.timedelta(minutes=30) <= end_dt:
+            next_dt = current_dt + datetime.timedelta(minutes=30)
+            chunk_start = current_dt.strftime("%H:%M")
+            chunk_end = next_dt.strftime("%H:%M")
+            
+            if (chunk_start, chunk_end) not in booked_times:
+                available_chunks.append({
+                    "start_time": chunk_start,
+                    "end_time": chunk_end
+                })
+                
+            current_dt = next_dt
+
+    # Sort chunks by time
+    available_chunks.sort(key=lambda x: x["start_time"])
+    return available_chunks
+
+def create_student_consultation_request(
+    database_session: Session,
+    student_account_id: int,
+    booking_data: schemas.StudentConsultationBookingCreate
+) -> models.ConsultationRequest:
+    
+    # Verify the chunk is available
+    chunks = generate_available_30min_chunks(
+        database_session=database_session,
+        faculty_account_id=booking_data.faculty_account_id,
+        target_date=booking_data.booking_date
+    )
+    
+    is_available = any(
+        c["start_time"] == booking_data.start_time and c["end_time"] == booking_data.end_time
+        for c in chunks
+    )
+    
+    if not is_available:
+        raise HTTPException(status_code=409, detail="This time slot is no longer available.")
+        
+    # Get any slot_id to fulfill the foreign key constraint (the first active slot for that day)
+    
+    parent_slot = (
+        database_session.query(models.ConsultationSlot)
+        .filter(
+            models.ConsultationSlot.faculty_account_id == booking_data.faculty_account_id,
+            models.ConsultationSlot.available_date == booking_data.booking_date,
+            models.ConsultationSlot.is_active == True,
+            models.ConsultationSlot.start_time <= booking_data.start_time,
+            models.ConsultationSlot.end_time >= booking_data.end_time
+        )
+        .first()
+    )
+    
+    if not parent_slot:
+        raise HTTPException(status_code=400, detail="Faculty no longer has a schedule covering this slot.")
+
+    new_request = models.ConsultationRequest(
+        slot_id=parent_slot.slot_id,
+        student_account_id=student_account_id,
+        faculty_account_id=booking_data.faculty_account_id,
+        reason=booking_data.reason,
+        booking_date=booking_data.booking_date,
+        start_time=booking_data.start_time,
+        end_time=booking_data.end_time,
+        status="PENDING"
+    )
+    
+    database_session.add(new_request)
+    database_session.commit()
+    database_session.refresh(new_request)
+    return new_request
+
+def get_student_consultation_requests(
+    database_session: Session,
+    student_account_id: int
+) -> list[dict]:
+    from src.modules.faculty.models import FacultyProfile
+    
+    rows = (
+        database_session.query(models.ConsultationRequest, FacultyProfile)
+        .outerjoin(FacultyProfile, models.ConsultationRequest.faculty_account_id == FacultyProfile.faculty_account_id)
+        .filter(models.ConsultationRequest.student_account_id == student_account_id)
+        .order_by(models.ConsultationRequest.created_at.desc())
+        .all()
+    )
+    
+    result = []
+    for req, profile in rows:
+        faculty_name = f"{profile.first_name} {profile.last_name}" if profile else "Unknown Faculty"
+        result.append({
+            "request_id": req.request_id,
+            "faculty_name": faculty_name,
+            "reason": req.reason,
+            "booking_date": req.booking_date,
+            "start_time": req.start_time,
+            "end_time": req.end_time,
+            "status": req.status,
+            "created_at": req.created_at.isoformat() if req.created_at else None,
+        })
+    return result

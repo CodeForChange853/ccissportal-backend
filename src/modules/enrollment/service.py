@@ -136,6 +136,111 @@ def process_student_enrollment_submission(
     return saved_record
 
 
+# ── Helper: materialize enrollment into gradebook entries ──────────────────
+
+def _materialize_enrollment(
+    database_session: Session,
+    enrollment_request: models.StudentEnrollmentRequest,
+) -> int:
+    """
+    When an enrollment request is APPROVED, create GradebookEntry rows
+    with completion_status='ENROLLED' for each subject, linking the student
+    to the faculty member already assigned to teach that subject.
+
+    Returns the number of subjects materialized.
+    """
+    from src.modules.faculty.models import GradebookEntry, FacultyProfile
+    from src.modules.enrollment.models import CurriculumSubject, StudentProfile
+
+    student_id   = enrollment_request.student_account_id
+    year_level   = enrollment_request.target_year_level
+    semester     = enrollment_request.target_semester
+    subject_codes = enrollment_request.extracted_subjects  # list[str] or None
+
+    # ── Step 1: Resolve subjects to enroll ──
+    if subject_codes:
+        subjects = (
+            database_session.query(CurriculumSubject)
+            .filter(CurriculumSubject.subject_code.in_(subject_codes))
+            .all()
+        )
+    else:
+        # Fallback: enroll in all subjects for the target year/semester
+        subjects = (
+            database_session.query(CurriculumSubject)
+            .filter(
+                CurriculumSubject.target_year_level == year_level,
+                CurriculumSubject.target_semester   == semester,
+            )
+            .all()
+        )
+
+    if not subjects:
+        return 0
+
+    # ── Step 2: Find a fallback faculty member ──
+    first_faculty = database_session.query(FacultyProfile).first()
+    fallback_faculty_id = first_faculty.faculty_account_id if first_faculty else None
+
+    if not fallback_faculty_id:
+        print("⚠️  No faculty profiles exist — cannot materialize enrollment.")
+        return 0
+
+    # ── Step 3: Deduplicate — skip subjects student already has a gradebook entry for ──
+    existing_subject_ids = {
+        row[0] for row in
+        database_session.query(GradebookEntry.curriculum_subject_id)
+        .filter(
+            GradebookEntry.student_account_id == student_id,
+            GradebookEntry.curriculum_subject_id.in_([s.subject_id for s in subjects]),
+        )
+        .all()
+    }
+
+    materialized = 0
+    for subj in subjects:
+        if subj.subject_id in existing_subject_ids:
+            continue
+
+        # Find the faculty assigned to teach this subject (template row with student_account_id=NULL)
+        assigned_template = (
+            database_session.query(GradebookEntry)
+            .filter(
+                GradebookEntry.curriculum_subject_id == subj.subject_id,
+                GradebookEntry.student_account_id == None,
+            )
+            .first()
+        )
+        fac_id = assigned_template.faculty_account_id if assigned_template else fallback_faculty_id
+
+        new_entry = GradebookEntry(
+            student_account_id=student_id,
+            faculty_account_id=fac_id,
+            curriculum_subject_id=subj.subject_id,
+            midterm_grade=None,
+            system_grade=None,
+            final_grade=None,
+            completion_status="ENROLLED",
+        )
+        database_session.add(new_entry)
+        materialized += 1
+
+    # ── Step 4: Update the student's profile to reflect the new year/semester ──
+    profile = (
+        database_session.query(StudentProfile)
+        .filter(StudentProfile.student_account_id == student_id)
+        .first()
+    )
+    if profile:
+        profile.current_year_level = year_level
+        profile.current_semester   = semester
+
+    if materialized > 0:
+        database_session.commit()
+
+    return materialized
+
+
 def process_admin_enrollment_decision(
     database_session: Session,
     target_request_id: int,
@@ -176,6 +281,14 @@ def process_admin_enrollment_decision(
         admin_notes=decision_data.admin_notes,
     )
 
+    # ── NEW: Materialize enrollment into gradebook when APPROVED ──
+    subjects_enrolled = 0
+    if decision_data.decision_status == "APPROVED":
+        subjects_enrolled = _materialize_enrollment(
+            database_session=database_session,
+            enrollment_request=updated_request,
+        )
+
     event_type = (
         "ENROLLMENT_APPROVED"
         if decision_data.decision_status == "APPROVED"
@@ -190,8 +303,9 @@ def process_admin_enrollment_decision(
         target_id=target_request_id,
         ip_address=ip_address,
         payload={
-            "student_id":  target_request.student_account_id,
-            "admin_notes": decision_data.admin_notes,
+            "student_id":        target_request.student_account_id,
+            "admin_notes":       decision_data.admin_notes,
+            "subjects_enrolled": subjects_enrolled,
         },
     )
 
@@ -270,7 +384,15 @@ def bulk_process_enrollment_decision(
         if decision_data.admin_notes:
             req.admin_notes = decision_data.admin_notes
         processed_count += 1
-        
+
+        # ── NEW: Materialize enrollment into gradebook when APPROVED ──
+        subjects_enrolled = 0
+        if decision_data.decision_status == "APPROVED":
+            subjects_enrolled = _materialize_enrollment(
+                database_session=database_session,
+                enrollment_request=req,
+            )
+
         audit_service.log_event(
             database_session=database_session,
             event_type="ENROLLMENT_DECISION_SUBMITTED",
@@ -279,8 +401,16 @@ def bulk_process_enrollment_decision(
             target_type="enrollment_request",
             target_id=req.request_id,
             ip_address=ip_address,
-            payload={"new_status": decision_data.decision_status, "bulk": True},
+            payload={
+                "new_status": decision_data.decision_status,
+                "bulk": True,
+                "subjects_enrolled": subjects_enrolled,
+            },
         )
+
+    database_session.commit()
+    return processed_count
+
 
 def update_curriculum_subject(
     database_session: Session,
@@ -317,6 +447,3 @@ def update_curriculum_subject(
     database_session.commit()
     database_session.refresh(subject)
     return subject
-
-    database_session.commit()
-    return processed_count

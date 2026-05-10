@@ -6,14 +6,13 @@ from typing import Optional, List
 
 class GradeSubmissionRequest(BaseModel):
     student_account_id: int
-    curriculum_subject_id: Optional[int] = None # Or subject_code via sync
+    curriculum_subject_id: Optional[int] = None 
     subject_code: Optional[str] = None
     midterm_grade: Optional[float] = None
     system_grade: Optional[float] = None
     final_grade: Optional[float] = None
     override_reason: Optional[str] = None
     completion_status: Optional[str] = None
-    # Epoch-ms timestamp from the client device for last-write-wins conflict resolution
     client_updated_at: Optional[int] = None
 
 class SyncGradesRequest(BaseModel):
@@ -75,3 +74,69 @@ class AdminFacultyListItem(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ── Triage Alerts 
+
+class TriageAlertOut(BaseModel):
+    alert_type: str            
+    severity: str              
+    title: str
+    description: str
+    subject_code: Optional[str] = None
+    student_name: Optional[str] = None
+    ticket_id: Optional[int] = None
+
+
+# ── Consultations 
+
+class ConsultationSlotCreate(BaseModel):
+    available_date: str
+    start_time: str
+    end_time: str
+
+class ConsultationSlotUpdate(BaseModel):
+    available_date: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    is_active: Optional[bool] = None
+
+class ConsultationSlotOut(BaseModel):
+    slot_id: int
+    available_date: str
+    start_time: str
+    end_time: str
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
+class ConsultationRequestOut(BaseModel):
+    request_id: int
+    student_name: Optional[str] = None
+    faculty_name: Optional[str] = None
+    reason: str
+    booking_date: str
+    start_time: str
+    end_time: str
+    status: str
+    created_at: Optional[str] = None
+
+class ConsultationStatusUpdate(BaseModel):
+    status: str   
+
+class AvailableTimeChunk(BaseModel):
+    start_time: str
+    end_time: str
+
+class FacultyWithSlotsOut(BaseModel):
+    account_id: int
+    faculty_name: str
+    academic_department: str
+
+class StudentConsultationBookingCreate(BaseModel):
+    faculty_account_id: int
+    booking_date: str
+    start_time: str
+    end_time: str
+    reason: str

@@ -1,5 +1,3 @@
-# backend-v2/src/modules/document_processing/router.py
-
 import shutil
 import uuid
 import os

@@ -90,7 +90,7 @@ def _build_student_snapshot(
             passed.add(sid)
         elif entry.completion_status == "FAILED":
             failed.add(sid)
-        elif entry.completion_status in ("IN PROGRESS", "INCOMPLETE"):
+        elif entry.completion_status in ("IN PROGRESS", "INCOMPLETE", "ENROLLED"):
             enrolled.add(sid)
 
     return StudentSnapshot(

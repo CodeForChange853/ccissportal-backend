@@ -11,6 +11,8 @@ class SystemSettingsResponse(BaseModel):
     is_enrollment_open: bool
     global_max_teaching_load: int
     student_registration_passkey: str
+    is_maintenance_mode: bool
+    maintenance_reason: Optional[str] = None
     last_updated_at: Optional[datetime] = None
 
     class Config:
@@ -20,6 +22,8 @@ class SystemSettingsResponse(BaseModel):
 class UpdateSystemSettingsRequest(BaseModel):
 
     is_enrollment_open: Optional[bool] = None
+    is_maintenance_mode: Optional[bool] = None
+    maintenance_reason: Optional[str] = None
 
     global_max_teaching_load: Optional[int] = Field(
         default=None,
