@@ -3,6 +3,7 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
+from google.genai.errors import APIError
 from PIL import Image
 
 from src.core.config import settings  
@@ -33,25 +34,7 @@ class COR(BaseModel):
     )
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# Advanced Confidence Scoring Engine
-# ─────────────────────────────────────────────────────────────────────────────
-#
-# Four weighted factors, each scored 0.0-1.0, combined into a single score:
-#
-#  Factor 1 - Field Completeness (30%)
-#    Were all expected fields populated?
-#
-#  Factor 2 - Format Validity (30%)
-#    Does the student ID match PH university ID pattern (YYYY-NNNNN)?
-#    Do subject codes match the standard alphanumeric format?
-#
-#  Factor 3 - Data Consistency (25%)
-#    For COR: does extracted total_units match computed sum of subjects?
-#    For ID: does full_name contain at least first + last name?
-#
-#  Factor 4 - Content Richness (15%)
-#    A COR with 1 subject is suspicious. 6-8 is a normal semester load.
+
 
 _STUDENT_ID_PATTERN = re.compile(r"^\d{4}-\d{4,6}$")
 _SUBJECT_CODE_PATTERN = re.compile(r"^[A-Z][A-Z0-9\s\-]{1,12}$", re.IGNORECASE)
@@ -220,25 +203,12 @@ class GeminiVisionService:
     def analyze(self, image_path: str, doc_type: str) -> dict:
         """
         Sends an image to Gemini Vision and returns a structured result.
-
-        Guaranteed return contract (ScanDiffViewer.jsx depends on this shape):
-        {
-            "status":               "SUCCESS" | "FAILURE" | "ERROR",
-            "doc_type":             "ID" | "COR",
-            "extracted_data":       { ...StudentID or COR fields... },
-            "confidence_score":     0.0 - 1.0,
-            "confidence_breakdown": {
-                "completeness":  float,
-                "format_valid":  float,
-                "consistency":   float,
-                "richness":      float,
-            },
-            "model_used":           str,
-            "error":                str | None,
-        }
         """
         try:
-            image = Image.open(image_path)
+            # Ensure the image file is closed properly after loading into memory
+            with Image.open(image_path) as img:
+                # Convert to RGB to avoid issues with PNG alpha channels
+                image = img.convert("RGB") 
 
             if doc_type == "ID":
                 target_schema = StudentID
@@ -265,40 +235,35 @@ class GeminiVisionService:
                     "error": f"Unsupported document type: '{doc_type}'. Must be 'ID' or 'COR'.",
                 }
 
-            # Primary attempt using the model ID from settings
+            # 1. Define the config once (DRY principle)
+            extraction_config = types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=target_schema,
+                safety_settings=[
+                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+                ]
+            )
+
+            # 2. Primary attempt
             try:
                 response = self.client.models.generate_content(
                     model=self.model_id,
                     contents=[image, prompt],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=target_schema,
-                        safety_settings=[
-                            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-                        ]
-                    ),
+                    config=extraction_config,
                 )
-            except Exception as e:
-                # If the primary model fails (e.g. 404 or location error), try the most stable one as a last resort
+            except APIError as e:
+                # 3. Fallback attempt using the EXACT SAME config
                 print(f"⚠️ Primary model {self.model_id} failed: {str(e)}. Attempting fallback...")
                 response = self.client.models.generate_content(
-                    model="gemini-2.0-flash",
+                    model="gemini-1.5-flash",
                     contents=[image, prompt],
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=target_schema,
-                        safety_settings=[
-                            types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                            types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                            types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                            types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
-                        ]
-                    ),
+                    config=extraction_config,
                 )
 
+            # 4. Check for empty parsed response
             if not response.parsed:
                 return {
                     "status": "FAILURE", "doc_type": doc_type,
@@ -309,19 +274,15 @@ class GeminiVisionService:
 
             extracted_data = response.parsed.model_dump()
 
-            # ── Payload validation gate — reject unusable extractions ──
+            # 5. Payload validation gate
             if doc_type == "ID":
                 validation_error = _validate_id_payload(extracted_data)
+                confidence_score, breakdown = _score_id_extraction(extracted_data)
             else:
                 validation_error = _validate_cor_payload(extracted_data)
+                confidence_score, breakdown = _score_cor_extraction(extracted_data)
 
             if validation_error:
-                # Still score it so the frontend can show diagnostics
-                if doc_type == "ID":
-                    confidence_score, breakdown = _score_id_extraction(extracted_data)
-                else:
-                    confidence_score, breakdown = _score_cor_extraction(extracted_data)
-
                 return {
                     "status":               "FAILURE",
                     "doc_type":             doc_type,
@@ -332,11 +293,7 @@ class GeminiVisionService:
                     "error":                validation_error,
                 }
 
-            if doc_type == "ID":
-                confidence_score, breakdown = _score_id_extraction(extracted_data)
-            else:
-                confidence_score, breakdown = _score_cor_extraction(extracted_data)
-
+            # 6. Success state
             return {
                 "status":               "SUCCESS",
                 "doc_type":             doc_type,
@@ -347,11 +304,20 @@ class GeminiVisionService:
                 "error":                None,
             }
 
+        except APIError as api_error:
+            # Correctly handle modern SDK API errors (like Quota Exceeded)
+            error_msg = f"API Error: {api_error.message}" if hasattr(api_error, "message") else str(api_error)
+            print(f"🚨 API Exhausted or Failed: {error_msg}")
+            return {
+                "status": "ERROR", "doc_type": doc_type,
+                "extracted_data": {}, "confidence_score": 0.0,
+                "confidence_breakdown": {}, "model_used": getattr(self, "model_id", "unknown"),
+                "error": error_msg,
+            }
+            
         except Exception as error:
-            from google.api_core.exceptions import ResourceExhausted
-            if isinstance(error, ResourceExhausted):
-                raise error
-
+            # Catch all other local python errors (e.g. image read failure)
+            print(f"🚨 Local Processing Error: {str(error)}")
             return {
                 "status": "ERROR", "doc_type": doc_type,
                 "extracted_data": {}, "confidence_score": 0.0,
