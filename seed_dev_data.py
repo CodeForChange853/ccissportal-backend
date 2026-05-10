@@ -220,6 +220,9 @@ TICKET_TEMPLATES = [
  
     ("ACADEMIC AFFAIRS",  "PENDING",  0.68,  False, "Subject equivalency evaluation",
      "Requesting evaluation of two subjects taken at a previous university for equivalency credit.", 5),
+
+    ("ACADEMIC AFFAIRS",  "OPEN",     0.84,  False, "Faculty consultation schedule",
+     "I would like to inquire about the consultation hours of Dr. Ramos for this semester.", 2),
 ]
  
 def seed_tickets(db, student_accounts: list[UserAccount], admin_account: UserAccount) -> None:
