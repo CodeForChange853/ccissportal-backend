@@ -69,9 +69,7 @@ class SupportTriageEngine:
         if len(training_texts) < MINIMUM_TRAINING_SAMPLES:
             return {
                 "status": "SKIPPED",
-                "reason": f"Only {len(training_texts)} labeled samples available. "
-                          f"Minimum required: {MINIMUM_TRAINING_SAMPLES}. "
-                          f"Keep flagging tickets until the threshold is met.",
+                "reason": "Nothing to retrain. You must re-route at least one ticket first.",
                 "trained_on": 0,
             }
 

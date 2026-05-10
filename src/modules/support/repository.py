@@ -100,6 +100,7 @@ def fetch_resolved_tickets_for_retraining(
         database_session.query(SupportTicket)
         .filter(
             SupportTicket.ticket_status == "RESOLVED",
+            SupportTicket.was_manually_rerouted == True,
             SupportTicket.confidence_score.isnot(None),
         )
         .order_by(SupportTicket.created_at.asc())
