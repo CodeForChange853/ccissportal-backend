@@ -90,6 +90,11 @@ class SupportTriageEngine:
             joblib.dump(self.ai_model, model_path)
 
             print(f"✅ Model retrained on {len(training_texts)} samples and saved.")
+            
+            # Force memory cleanup for low-RAM environments (Render 512MB)
+            import gc
+            gc.collect()
+
             return {
                 "status": "SUCCESS",
                 "trained_on": len(training_texts),
