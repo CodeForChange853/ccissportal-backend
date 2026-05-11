@@ -89,7 +89,10 @@ def fetch_student_transcript_with_subjects(
         subject_code=     subject.subject_code,
         subject_title=    subject.subject_title,
         credit_units=     subject.credit_units,   # Fix: was missing, caused wrong GWA
+        target_year_level=subject.target_year_level,
+        target_semester=  subject.target_semester,
         midterm_grade=    grade.midterm_grade,
+        system_grade=     grade.system_grade,
         final_grade=      grade.final_grade,
         completion_status=grade.completion_status,
     )
@@ -155,8 +158,10 @@ def fetch_class_roster_by_subject(
         roster.append(
             schemas.ClassRosterResponse(
                 student_account_id=account.account_id,
+                curriculum_subject_id=subject.subject_id,
                 student_id=student_id_str,
                 student_name=name,
+                midterm_grade=grade.midterm_grade,
                 system_grade=grade.system_grade,
                 final_grade=grade.final_grade,
                 override_reason=grade.override_reason,

@@ -96,14 +96,36 @@ class NextSemesterRecommendation(BaseModel):
     subject_results:  List[SubjectAvailabilityResult]
 
 
+class BackSubjectRecord(BaseModel):
+    """A failed subject recommended for retake."""
+    subject_id:      int
+    subject_code:    str
+    subject_title:   str
+    credit_units:    int
+    subject_type:    str              # MAJOR | MINOR | SPECIAL
+    times_failed:    int
+    blocking_reason: Optional[str] = None
+
+
+class RetentionStatus(BaseModel):
+    """Academic retention standing."""
+    status:                str        # GOOD | AT_RISK | UNDER_RETENTION | DROPOUT_RISK
+    message:               str
+    at_risk_major_count:   int  = 0
+    failed_units:          int  = 0
+
+
 class AcademicStandingResponse(BaseModel):
 
     student_year_level:           int
     student_semester:             int
     student_name:                 str
+    is_irregular:                 bool              = False
     current_subjects:             List[GradeRecord]
     passed_subjects:              List[GradeRecord]
     next_semester_recommendation: NextSemesterRecommendation
+    back_subjects:                List[BackSubjectRecord]    = []
+    retention_status:             Optional[RetentionStatus] = None
 
 
 

@@ -8,6 +8,7 @@ class StudentEnrollmentSubmission(BaseModel):
     target_year_level: int
     target_semester:   int
     document_verification_token: Optional[str] = None
+    extracted_subjects: Optional[list[str]] = None
 
 
 class AdminApprovalDecision(BaseModel):

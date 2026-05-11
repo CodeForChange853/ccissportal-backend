@@ -1,18 +1,19 @@
 # backend-v2/src/modules/faculty/schemas.py
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import Optional, List
 
 
 class GradeSubmissionRequest(BaseModel):
     student_account_id: int
     curriculum_subject_id: Optional[int] = None 
-    subject_code: Optional[str] = None
+    subject_code: Optional[str] = Field(None, max_length=50)
     midterm_grade: Optional[float] = None
     system_grade: Optional[float] = None
     final_grade: Optional[float] = None
-    override_reason: Optional[str] = None
-    completion_status: Optional[str] = None
+    raw_scores: Optional[dict] = None
+    override_reason: Optional[str] = Field(None, max_length=500)
+    completion_status: Optional[str] = Field(None, max_length=50)
     client_updated_at: Optional[int] = None
 
 class SyncGradesRequest(BaseModel):
@@ -25,8 +26,10 @@ class SyncGradesResponse(BaseModel):
 
 class ClassRosterResponse(BaseModel):
     student_account_id: int
+    curriculum_subject_id: int  # Added to ensure sync matches
     student_id: str
     student_name: str
+    midterm_grade: Optional[float]
     system_grade: Optional[float]
     final_grade: Optional[float]
     override_reason: Optional[str]
@@ -37,7 +40,10 @@ class StudentGradeReport(BaseModel):
     subject_code:      str
     subject_title:     str
     credit_units:      int
+    target_year_level: int
+    target_semester:   int
     midterm_grade:     Optional[float]
+    system_grade:      Optional[float]
     final_grade:       Optional[float]
     completion_status: str
 
@@ -137,7 +143,7 @@ class FacultyWithSlotsOut(BaseModel):
 
 class StudentConsultationBookingCreate(BaseModel):
     faculty_account_id: int
-    booking_date: str
-    start_time: str
-    end_time: str
-    reason: str
+    booking_date: str = Field(..., max_length=50)
+    start_time: str = Field(..., max_length=20)
+    end_time: str = Field(..., max_length=20)
+    reason: str = Field(..., max_length=500)

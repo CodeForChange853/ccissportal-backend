@@ -28,6 +28,26 @@ def upload_and_scan_document(
     database_session: Session = Depends(get_database_session),
     current_user: UserAccount | None = Depends(get_optional_current_user),
 ):
+    # ── 1. Validate File Size (5MB Limit) ─────────────────────────────
+    MAX_SIZE = 5 * 1024 * 1024  # 5MB
+    # We seek to the end to get size, then back to 0
+    uploaded_file.file.seek(0, os.SEEK_END)
+    file_size = uploaded_file.file.tell()
+    uploaded_file.file.seek(0)
+    
+    if file_size > MAX_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File too large ({file_size} bytes). Maximum allowed is 5MB."
+        )
+
+    # ── 2. Validate MIME Type ──────────────────────────────────────────
+    ALLOWED_TYPES = ["image/jpeg", "image/png", "application/pdf"]
+    if uploaded_file.content_type not in ALLOWED_TYPES:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"Invalid file type '{uploaded_file.content_type}'. Only JPG, PNG, and PDF are allowed."
+        )
 
     secure_token   = str(uuid.uuid4())
     temp_file_path = f"temp_uploads/{secure_token}_{uploaded_file.filename}"

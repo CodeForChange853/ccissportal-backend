@@ -173,13 +173,46 @@ def get_student_academic_standing(
         ],
     )
 
+    # Convert back subjects to schema
+    def to_back_subject_records(records: list) -> list[schemas.BackSubjectRecord]:
+        result = []
+        for r in records:
+            def _g(key, default=None):
+                return r.get(key, default) if isinstance(r, dict) else getattr(r, key, default)
+            result.append(schemas.BackSubjectRecord(
+                subject_id=      _g("subject_id", -1),
+                subject_code=    _g("subject_code", ""),
+                subject_title=   _g("subject_title", ""),
+                credit_units=    _g("credit_units", 0),
+                subject_type=    _g("subject_type", "MINOR"),
+                times_failed=    _g("times_failed", 1),
+                blocking_reason= _g("blocking_reason"),
+            ))
+        return result
+
+    # Convert retention status to schema
+    raw_retention = standing.get("retention_status")
+    retention_schema = None
+    if raw_retention is not None:
+        def _gr(key, default=None):
+            return raw_retention.get(key, default) if isinstance(raw_retention, dict) else getattr(raw_retention, key, default)
+        retention_schema = schemas.RetentionStatus(
+            status=              _gr("status", "GOOD"),
+            message=             _gr("message", ""),
+            at_risk_major_count= _gr("at_risk_major_count", 0),
+            failed_units=        _gr("failed_units", 0),
+        )
+
     return schemas.AcademicStandingResponse(
         student_year_level=current_year,
         student_semester=current_semester,
         student_name=student_name,
+        is_irregular=standing.get("is_irregular", False),
         current_subjects=to_grade_records(standing["current_subjects"]),
         passed_subjects=to_grade_records(standing["passed_subjects"]),
         next_semester_recommendation=next_rec,
+        back_subjects=to_back_subject_records(standing.get("back_subjects", [])),
+        retention_status=retention_schema,
     )
 
 

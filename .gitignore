@@ -2,3 +2,6 @@ venv/
 __pycache__/
 *.pyc
 .env
+local.db
+*.db
+temp_uploads/

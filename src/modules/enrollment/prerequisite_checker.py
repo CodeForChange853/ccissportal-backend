@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -9,13 +9,14 @@ from src.modules.enrollment.models import CurriculumSubject
 from src.modules.faculty.models import GradebookEntry
 
 
-# ── Status constants 
+# ── Status constants ──────────────────────────────────────────────────────────
 
 AVAILABLE          = "AVAILABLE"
 BLOCKED            = "BLOCKED"
 PENDING            = "PENDING"
 ALREADY_COMPLETED  = "ALREADY_COMPLETED"
 CURRENTLY_ENROLLED = "CURRENTLY_ENROLLED"
+BACK_SUBJECT       = "BACK_SUBJECT"   # failed subject recommended for retake
 
 # Verdict constants (top-level recommendation)
 VERDICT_APPROVE      = "APPROVE"
@@ -23,8 +24,39 @@ VERDICT_PARTIAL      = "PARTIAL"
 VERDICT_CONDITIONAL  = "CONDITIONAL"
 VERDICT_DEFER        = "DEFER"
 
+# Subject type constants
+SUBJECT_MAJOR   = "MAJOR"
+SUBJECT_MINOR   = "MINOR"
+SUBJECT_SPECIAL = "SPECIAL"   # NSTP, LTS, CWTS, ROTC, PATHFIT
 
-# ── Data classes 
+# Retention status constants
+RETENTION_GOOD    = "GOOD"
+RETENTION_AT_RISK = "AT_RISK"
+RETENTION_UNDER   = "UNDER_RETENTION"
+RETENTION_DROPOUT = "DROPOUT_RISK"
+
+# Special subject code keywords
+SPECIAL_KEYWORDS = ("NSTP", "LTS", "CWTS", "ROTC", "PATHFIT")
+
+
+# ── Subject type classifier ───────────────────────────────────────────────────
+
+def classify_subject(subject: CurriculumSubject) -> str:
+    """
+    Classify a subject:
+    - SPECIAL  → code contains NSTP, LTS, CWTS, ROTC, PATHFIT (weekend programs)
+    - MAJOR    → has a prerequisite_subject_id (is part of an advanced chain)
+    - MINOR/GE → no prerequisite and not special
+    """
+    code_upper = (subject.subject_code or "").upper()
+    if any(kw in code_upper for kw in SPECIAL_KEYWORDS):
+        return SUBJECT_SPECIAL
+    if subject.prerequisite_subject_id is not None:
+        return SUBJECT_MAJOR
+    return SUBJECT_MINOR
+
+
+# ── Data classes ──────────────────────────────────────────────────────────────
 
 @dataclass
 class SubjectCheckResult:
@@ -33,10 +65,30 @@ class SubjectCheckResult:
     subject_title:   str
     credit_units:    int
     status:          str
+    subject_type:    str             = SUBJECT_MINOR
     prereq_code:     Optional[str]  = None
     prereq_title:    Optional[str]  = None
-    prereq_status:   Optional[str]  = None   # how the student stands on the prereq
+    prereq_status:   Optional[str]  = None
     blocking_reason: Optional[str]  = None
+
+
+@dataclass
+class BackSubjectRecord:
+    subject_id:      int
+    subject_code:    str
+    subject_title:   str
+    credit_units:    int
+    subject_type:    str
+    times_failed:    int
+    blocking_reason: Optional[str]  = None
+
+
+@dataclass
+class RetentionStatus:
+    status:                str
+    message:               str
+    at_risk_major_count:   int  = 0
+    failed_units:          int  = 0
 
 
 @dataclass
@@ -51,45 +103,47 @@ class RecommendationResult:
     subject_results:  list[SubjectCheckResult]
 
 
-# ── Student academic snapshot ──────────────────────────────────────────────
+# ── Student academic snapshot ─────────────────────────────────────────────────
 
 @dataclass
 class StudentSnapshot:
-
     passed_subject_ids:   set[int]
     failed_subject_ids:   set[int]
     enrolled_subject_ids: set[int]
-
-    # Code → status for building human-readable prereq_status strings
-    id_to_status: dict[int, str]
+    id_to_status:         dict[int, str]
+    id_to_final_grade:    dict[int, Optional[float]]
+    failed_entries:       list[tuple]   # list of (GradebookEntry, CurriculumSubject)
 
 
 def _build_student_snapshot(
     db: Session,
     student_account_id: int,
 ) -> StudentSnapshot:
- 
-    entries = (
-        db.query(GradebookEntry)
-        .filter(
-            GradebookEntry.student_account_id == student_account_id
-        )
+
+    rows = (
+        db.query(GradebookEntry, CurriculumSubject)
+        .join(CurriculumSubject, GradebookEntry.curriculum_subject_id == CurriculumSubject.subject_id)
+        .filter(GradebookEntry.student_account_id == student_account_id)
         .all()
     )
 
     passed   : set[int] = set()
     failed   : set[int] = set()
     enrolled : set[int] = set()
-    id_to_status: dict[int, str] = {}
+    id_to_status:      dict[int, str]            = {}
+    id_to_final_grade: dict[int, Optional[float]] = {}
+    failed_entries: list[tuple] = []
 
-    for entry in entries:
+    for entry, subject in rows:
         sid = entry.curriculum_subject_id
-        id_to_status[sid] = entry.completion_status
+        id_to_status[sid]      = entry.completion_status
+        id_to_final_grade[sid] = entry.final_grade
 
         if entry.completion_status == "PASSED":
             passed.add(sid)
         elif entry.completion_status == "FAILED":
             failed.add(sid)
+            failed_entries.append((entry, subject))
         elif entry.completion_status in ("IN PROGRESS", "INCOMPLETE", "ENROLLED"):
             enrolled.add(sid)
 
@@ -98,10 +152,12 @@ def _build_student_snapshot(
         failed_subject_ids=failed,
         enrolled_subject_ids=enrolled,
         id_to_status=id_to_status,
+        id_to_final_grade=id_to_final_grade,
+        failed_entries=failed_entries,
     )
 
 
-# ── Core check function 
+# ── Core check function ───────────────────────────────────────────────────────
 
 def _check_one_subject(
     subject: CurriculumSubject,
@@ -109,45 +165,48 @@ def _check_one_subject(
     prereq_subject: Optional[CurriculumSubject],
 ) -> SubjectCheckResult:
 
-    sid = subject.subject_id
+    sid          = subject.subject_id
+    subject_type = classify_subject(subject)
 
-    # ── Already in history 
+    # ── Already passed ────────────────────────────────────────────────────────
     if sid in snapshot.passed_subject_ids:
         return SubjectCheckResult(
             subject_id=sid,
             subject_code=subject.subject_code,
             subject_title=subject.subject_title,
             credit_units=subject.credit_units,
+            subject_type=subject_type,
             status=ALREADY_COMPLETED,
             blocking_reason="Student already passed this subject.",
         )
 
+    # ── Currently enrolled ────────────────────────────────────────────────────
     if sid in snapshot.enrolled_subject_ids:
         return SubjectCheckResult(
             subject_id=sid,
             subject_code=subject.subject_code,
             subject_title=subject.subject_title,
             credit_units=subject.credit_units,
+            subject_type=subject_type,
             status=CURRENTLY_ENROLLED,
             blocking_reason="Student is currently enrolled in this subject.",
         )
 
-    # ── No prerequisite → always available 
+    # ── No prerequisite → AVAILABLE ───────────────────────────────────────────
     if subject.prerequisite_subject_id is None:
         return SubjectCheckResult(
             subject_id=sid,
             subject_code=subject.subject_code,
             subject_title=subject.subject_title,
             credit_units=subject.credit_units,
+            subject_type=subject_type,
             status=AVAILABLE,
         )
 
-    # ── Has prerequisite — evaluate it 
+    # ── Has prerequisite — evaluate it ────────────────────────────────────────
     prereq_id    = subject.prerequisite_subject_id
     prereq_code  = prereq_subject.subject_code  if prereq_subject else str(prereq_id)
     prereq_title = prereq_subject.subject_title if prereq_subject else "Unknown"
-
-    prereq_student_status = snapshot.id_to_status.get(prereq_id)
 
     if prereq_id in snapshot.passed_subject_ids:
         return SubjectCheckResult(
@@ -155,6 +214,7 @@ def _check_one_subject(
             subject_code=subject.subject_code,
             subject_title=subject.subject_title,
             credit_units=subject.credit_units,
+            subject_type=subject_type,
             status=AVAILABLE,
             prereq_code=prereq_code,
             prereq_title=prereq_title,
@@ -167,6 +227,7 @@ def _check_one_subject(
             subject_code=subject.subject_code,
             subject_title=subject.subject_title,
             credit_units=subject.credit_units,
+            subject_type=subject_type,
             status=PENDING,
             prereq_code=prereq_code,
             prereq_title=prereq_title,
@@ -183,22 +244,24 @@ def _check_one_subject(
             subject_code=subject.subject_code,
             subject_title=subject.subject_title,
             credit_units=subject.credit_units,
+            subject_type=subject_type,
             status=BLOCKED,
             prereq_code=prereq_code,
             prereq_title=prereq_title,
             prereq_status="FAILED",
             blocking_reason=(
                 f"Prerequisite '{prereq_code} — {prereq_title}' was FAILED. "
-                f"Student must retake and pass it first."
+                f"Add it as a back subject and pass it before taking this."
             ),
         )
 
-    # Prereq was never taken at all
+    # Prereq was never taken
     return SubjectCheckResult(
         subject_id=sid,
         subject_code=subject.subject_code,
         subject_title=subject.subject_title,
         credit_units=subject.credit_units,
+        subject_type=subject_type,
         status=BLOCKED,
         prereq_code=prereq_code,
         prereq_title=prereq_title,
@@ -210,7 +273,127 @@ def _check_one_subject(
     )
 
 
-# ── Verdict builder 
+# ── Back subjects builder ─────────────────────────────────────────────────────
+
+def _build_back_subjects(snapshot: StudentSnapshot) -> list[BackSubjectRecord]:
+    """
+    Returns all failed subjects that the student should retake.
+    Excludes subjects already being retaken (enrolled).
+    """
+    # Count failures per subject_id (strike counter)
+    strike_counter: dict[int, int] = {}
+    for entry, subject in snapshot.failed_entries:
+        sid = entry.curriculum_subject_id
+        strike_counter[sid] = strike_counter.get(sid, 0) + 1
+
+    seen: set[int] = set()
+    back_subjects: list[BackSubjectRecord] = []
+
+    for entry, subject in snapshot.failed_entries:
+        sid = entry.curriculum_subject_id
+
+        # Skip if already re-enrolled for retake
+        if sid in snapshot.enrolled_subject_ids:
+            continue
+        # Skip duplicates (multiple fail records for same subject)
+        if sid in seen:
+            continue
+        seen.add(sid)
+
+        subject_type = classify_subject(subject)
+        times_failed = strike_counter.get(sid, 1)
+
+        if subject_type == SUBJECT_SPECIAL:
+            reason = (
+                f"'{subject.subject_code}' is a special weekend program (NSTP/LTS/CWTS). "
+                f"Students who do not pass in Year 1 must retake it in the next year level."
+            )
+        elif subject_type == SUBJECT_MAJOR:
+            reason = (
+                f"'{subject.subject_code}' is a MAJOR subject. "
+                f"Advanced subjects that require it as a prerequisite are blocked until passed."
+            )
+        else:
+            reason = (
+                f"'{subject.subject_code}' is a MINOR/GE subject. "
+                f"You may advance to next year, but it is recommended to retake it as extra load."
+            )
+
+        back_subjects.append(BackSubjectRecord(
+            subject_id=sid,
+            subject_code=subject.subject_code,
+            subject_title=subject.subject_title,
+            credit_units=subject.credit_units,
+            subject_type=subject_type,
+            times_failed=times_failed,
+            blocking_reason=reason,
+        ))
+
+    # Sort: MAJOR first (most critical), then SPECIAL, then MINOR
+    type_order = {SUBJECT_MAJOR: 0, SUBJECT_SPECIAL: 1, SUBJECT_MINOR: 2}
+    back_subjects.sort(key=lambda b: type_order.get(b.subject_type, 3))
+    return back_subjects
+
+
+# ── Retention checker ─────────────────────────────────────────────────────────
+
+def _check_retention(snapshot: StudentSnapshot) -> RetentionStatus:
+    """
+    Retention policy:
+    - 3+ MAJOR subjects with final_grade of 3.0 → UNDER_RETENTION
+    - 1-2 MAJOR subjects at 3.0                 → AT_RISK
+    - Combined with multiple failures            → DROPOUT_RISK
+    """
+    at_risk_major_count = 0
+    failed_units        = 0
+
+    for entry, subject in snapshot.failed_entries:
+        if classify_subject(subject) == SUBJECT_MAJOR:
+            grade = entry.final_grade
+            # 3.0 in Philippine grading = conditional pass / retention trigger
+            if grade is not None:
+                try:
+                    if float(grade) >= 3.0:
+                        at_risk_major_count += 1
+                except (ValueError, TypeError):
+                    pass
+        failed_units += subject.credit_units
+
+    total_failed = len(snapshot.failed_subject_ids)
+
+    if at_risk_major_count >= 3 and total_failed > 3:
+        status  = RETENTION_DROPOUT
+        message = (
+            f"HIGH RISK: Student has {at_risk_major_count} major subjects with a 3.0 grade "
+            f"and {total_failed} total failed subjects. Student is UNDER RETENTION and at serious "
+            f"risk of dropout. Requires mandatory academic counseling before enrollment is approved."
+        )
+    elif at_risk_major_count >= 3:
+        status  = RETENTION_UNDER
+        message = (
+            f"WARNING: Student has {at_risk_major_count} major subjects with a 3.0 grade. "
+            f"Student is UNDER RETENTION. A retention exam is required to continue in the program. "
+            f"Failing the retention exam may result in program transfer or dismissal."
+        )
+    elif at_risk_major_count > 0:
+        status  = RETENTION_AT_RISK
+        message = (
+            f"NOTICE: Student has {at_risk_major_count} major subject(s) with a 3.0 grade. "
+            f"One more will trigger the retention policy. Monitor academic performance closely."
+        )
+    else:
+        status  = RETENTION_GOOD
+        message = "Student is in good academic standing."
+
+    return RetentionStatus(
+        status=status,
+        message=message,
+        at_risk_major_count=at_risk_major_count,
+        failed_units=failed_units,
+    )
+
+
+# ── Verdict builder ───────────────────────────────────────────────────────────
 
 def _build_recommendation(
     subject_results: list[SubjectCheckResult],
@@ -234,7 +417,7 @@ def _build_recommendation(
         if r.status in (BLOCKED, PENDING)
     ]
 
-    sem_label = {1: "1st", 2: "2nd", 3: "Summer"}.get(target_semester, str(target_semester))
+    sem_label  = {1: "1st", 2: "2nd", 3: "Summer"}.get(target_semester, str(target_semester))
     year_label = {1: "1st", 2: "2nd", 3: "3rd", 4: "4th"}.get(target_year, str(target_year))
 
     if blocked == 0 and pending == 0:
@@ -250,7 +433,7 @@ def _build_recommendation(
             f"Pending prerequisites in progress: {pend_list}. "
             f"Approve conditionally — verify final grades before the next semester starts."
         )
-    elif blocked > 0 and (blocked / total) < 0.5:
+    elif blocked > 0 and total > 0 and (blocked / total) < 0.5:
         verdict = VERDICT_PARTIAL
         block_list = ", ".join(r.subject_code for r in enrollable if r.status == BLOCKED)
         action  = (
@@ -261,7 +444,7 @@ def _build_recommendation(
         verdict = VERDICT_DEFER
         action  = (
             f"Too many unmet prerequisites ({blocked}/{total} subjects blocked). "
-            f"Student should retake failed subjects and re-enroll next semester."
+            f"Student should retake failed back subjects and re-enroll next semester."
         )
 
     return RecommendationResult(
@@ -276,10 +459,9 @@ def _build_recommendation(
     )
 
 
-# ── Public API 
+# ── Public API ────────────────────────────────────────────────────────────────
 
 class PrerequisiteChecker:
-
 
     def __init__(self, db: Session) -> None:
         self._db = db
@@ -293,7 +475,7 @@ class PrerequisiteChecker:
             CurriculumSubject.subject_id == prereq_id
         ).first()
 
-    # ── check_semester 
+    # ── check_semester ───────────────────────────────────────────────────────
 
     def check_semester(
         self,
@@ -301,7 +483,7 @@ class PrerequisiteChecker:
         year: int,
         semester: int,
     ) -> RecommendationResult:
- 
+
         snapshot = _build_student_snapshot(self._db, student_account_id)
 
         subjects = (
@@ -314,7 +496,6 @@ class PrerequisiteChecker:
             .all()
         )
 
-        # Batch-load all prerequisite subjects in one query instead of one per subject
         prereq_ids = {
             s.prerequisite_subject_id
             for s in subjects
@@ -340,12 +521,12 @@ class PrerequisiteChecker:
 
         return _build_recommendation(results, year, semester)
 
-    # ── check_subjects 
+    # ── check_subjects ───────────────────────────────────────────────────────
 
     def check_subjects(
         self,
         student_account_id: int,
-        subject_codes: list[str],       
+        subject_codes: list[str],
     ) -> RecommendationResult:
 
         if not subject_codes:
@@ -353,7 +534,6 @@ class PrerequisiteChecker:
 
         snapshot = _build_student_snapshot(self._db, student_account_id)
 
-        # Single bulk fetch for all requested subject codes
         subjects_found = (
             self._db.query(CurriculumSubject)
             .filter(CurriculumSubject.subject_code.in_(subject_codes))
@@ -361,7 +541,6 @@ class PrerequisiteChecker:
         )
         subject_map = {s.subject_code: s for s in subjects_found}
 
-        # Collect all unique prerequisite IDs, then fetch them in one query
         prereq_ids = {
             s.prerequisite_subject_id
             for s in subjects_found
@@ -376,23 +555,22 @@ class PrerequisiteChecker:
             )
             prereq_map = {p.subject_id: p for p in prereqs}
 
-        results: list[SubjectCheckResult] = []
+        results:    list[SubjectCheckResult] = []
         year_levels: list[int] = []
         semesters:   list[int] = []
 
         for code in subject_codes:
             subject = subject_map.get(code)
-
             if subject is None:
                 results.append(SubjectCheckResult(
                     subject_id=-1,
                     subject_code=code,
                     subject_title="Unknown Subject",
                     credit_units=0,
+                    subject_type=SUBJECT_MINOR,
                     status=BLOCKED,
                     blocking_reason=(
-                        f"Subject code '{code}' was not found in the curriculum database. "
-                        f"Verify the subject code or update the curriculum."
+                        f"Subject code '{code}' was not found in the curriculum database."
                     ),
                 ))
                 continue
@@ -407,7 +585,7 @@ class PrerequisiteChecker:
 
         return _build_recommendation(results, target_year, target_sem)
 
-    # ── next_semester ──────────────────────────────────────────────────────
+    # ── next_semester ────────────────────────────────────────────────────────
 
     def next_semester(
         self,
@@ -416,11 +594,9 @@ class PrerequisiteChecker:
         current_semester: int,
     ) -> RecommendationResult:
 
-        # Determine next year/semester
         if current_semester == 1:
             next_year, next_sem = current_year, 2
         elif current_semester == 2:
-            # Check if a summer semester exists for this year
             summer_exists = self._db.query(CurriculumSubject).filter(
                 CurriculumSubject.target_year_level == current_year,
                 CurriculumSubject.target_semester   == 3,
@@ -433,10 +609,8 @@ class PrerequisiteChecker:
         elif current_semester == 3:
             next_year, next_sem = current_year + 1, 1
         else:
-            # Unexpected semester value — default forward
             next_year, next_sem = current_year, current_semester + 1
 
-        # Guard: 4th year 2nd semester is the last
         if current_year >= 4 and current_semester >= 2:
             return RecommendationResult(
                 verdict=VERDICT_APPROVE,
@@ -451,7 +625,7 @@ class PrerequisiteChecker:
 
         return self.check_semester(student_account_id, next_year, next_sem)
 
-    # ── Academic standing snapshot (all three tabs at once) ────────────────
+    # ── Academic standing snapshot ────────────────────────────────────────────
 
     def get_academic_standing(
         self,
@@ -484,18 +658,21 @@ class PrerequisiteChecker:
                 "completion_status": entry.completion_status,
             }
 
-            if entry.completion_status == "IN PROGRESS":
+            if entry.completion_status in ("IN PROGRESS", "ENROLLED", "NOT STARTED"):
                 current_subjects.append(record)
             elif entry.completion_status == "PASSED":
                 passed_subjects.append(record)
 
-        # Sort passed subjects chronologically (year → semester → code)
         passed_subjects.sort(
             key=lambda r: (r["target_year_level"], r["target_semester"], r["subject_code"])
         )
-
-        # Sort current subjects by code
         current_subjects.sort(key=lambda r: r["subject_code"])
+
+        # Build enriched data
+        snapshot         = _build_student_snapshot(self._db, student_account_id)
+        back_subjects    = _build_back_subjects(snapshot)
+        retention_status = _check_retention(snapshot)
+        is_irregular     = len(snapshot.failed_subject_ids) > 0
 
         next_rec = self.next_semester(
             student_account_id, current_year, current_semester
@@ -505,4 +682,7 @@ class PrerequisiteChecker:
             "current_subjects":             current_subjects,
             "passed_subjects":              passed_subjects,
             "next_semester_recommendation": next_rec,
+            "back_subjects":                back_subjects,
+            "retention_status":             retention_status,
+            "is_irregular":                 is_irregular,
         }

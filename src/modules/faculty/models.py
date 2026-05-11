@@ -50,6 +50,7 @@ class GradebookEntry(Base):
     midterm_grade     = Column(Float,     nullable=True)
     system_grade      = Column(Float,     nullable=True)
     final_grade       = Column(Float,     nullable=True)
+    raw_scores        = Column(Text,      nullable=True) # JSON string for Quizzes, Exams, Assignments
     override_reason   = Column(String(500), nullable=True)
     completion_status = Column(String(50), default="IN PROGRESS", index=True)
 

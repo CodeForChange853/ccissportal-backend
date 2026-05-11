@@ -44,7 +44,7 @@ class ResolveTicketRequest(BaseModel):
     NEW: Optional resolution note an Admin can attach when closing a ticket.
     The note field is optional so admins can resolve with one click if needed.
     """
-    resolution_note: Optional[str] = None
+    resolution_note: Optional[str] = Field(None, max_length=500)
 
 class RerouteTicketRequest(BaseModel):
     """
@@ -52,8 +52,8 @@ class RerouteTicketRequest(BaseModel):
     Admin supplies the correct department after reviewing a mis-triaged ticket.
     Setting this marks was_manually_rerouted=True, feeding the accuracy metric.
     """
-    correct_category: str
-    resolution_note: Optional[str] = None
+    correct_category: str = Field(..., max_length=50)
+    resolution_note: Optional[str] = Field(None, max_length=500)
 
 
 class TelemetryStatsResponse(BaseModel):

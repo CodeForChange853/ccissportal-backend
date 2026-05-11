@@ -123,12 +123,13 @@ def execute_background_ai_scan(
                         "suggested_action": rec.suggested_action,
                     }
                     print(
-                        f"✅ PrerequisiteChecker: {len(subject_codes)} subjects "
-                        f"for student #{student_account_id} → verdict: {rec.verdict}"
+                        f"PrerequisiteChecker: {len(subject_codes)} subjects "
+                        f"for student #{student_account_id} -> verdict: {rec.verdict}"
                     )
 
             except Exception as checker_err:
-                print(f"⚠️  PrerequisiteChecker error (non-fatal): {checker_err}")
+                database_session.rollback()
+                print(f"PrerequisiteChecker error (non-fatal): {checker_err}")
                 ai_recommendation = {
                     "verdict":          "ERROR",
                     "suggested_action": f"Prerequisite check failed: {str(checker_err)}",
@@ -159,6 +160,7 @@ def execute_background_ai_scan(
         )
 
     except Exception as unexpected_error:
+        database_session.rollback()
         repository.update_scan_completion(
             database_session=database_session,
             token=scan_token,
@@ -168,7 +170,7 @@ def execute_background_ai_scan(
     finally:
         if os.path.exists(file_path):
             os.remove(file_path)
-            print(f"🔒 Privacy: '{file_path}' deleted after processing.")
+            print(f"Privacy: '{file_path}' deleted after processing.")
 
         audit_service.log_event(
             database_session=database_session,

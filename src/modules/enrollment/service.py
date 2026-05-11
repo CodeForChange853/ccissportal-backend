@@ -26,12 +26,19 @@ def process_student_enrollment_submission(
 
     # ── Step 2: Year/semester validation for unscanned submissions 
     if not submission_data.document_verification_token:
-        if submission_data.target_year_level != 1 or submission_data.target_semester != 1:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="New students without a scanned Certificate of Registration "
-                       "must enroll in Year 1, Semester 1.",
-            )
+        # Only enforce year 1 sem 1 for completely new students (no grades in history)
+        from src.modules.faculty.models import GradebookEntry
+        has_grades = database_session.query(GradebookEntry).filter(
+            GradebookEntry.student_account_id == student_id
+        ).first() is not None
+        
+        if not has_grades:
+            if submission_data.target_year_level != 1 or submission_data.target_semester != 1:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="New students without a scanned Certificate of Registration "
+                           "must enroll in Year 1, Semester 1.",
+                )
 
     # ── Step 3: Pull PrerequisiteChecker data from the existing scan record ───
     extracted_subjects  = None
@@ -61,42 +68,48 @@ def process_student_enrollment_submission(
                 if cached_verification:
                     verification_result = cached_verification
                     ai_recommendation   = cached_recommendation
-                elif extracted_subjects:
-                    try:
-                        from src.modules.enrollment.prerequisite_checker import PrerequisiteChecker
-                        checker = PrerequisiteChecker(database_session)
-                        rec     = checker.check_subjects(
-                            student_account_id=student_id,
-                            subject_codes=extracted_subjects,
-                        )
-                        verification_result = [
-                            {
-                                "subject_id":      r.subject_id,
-                                "subject_code":    r.subject_code,
-                                "subject_title":   r.subject_title,
-                                "credit_units":    r.credit_units,
-                                "status":          r.status,
-                                "prereq_code":     r.prereq_code,
-                                "prereq_title":    r.prereq_title,
-                                "prereq_status":   r.prereq_status,
-                                "blocking_reason": r.blocking_reason,
-                            }
-                            for r in rec.subject_results
-                        ]
-                        ai_recommendation = {
-                            "verdict":          rec.verdict,
-                            "pass_rate":        rec.pass_rate,
-                            "available_count":  rec.available_count,
-                            "blocked_count":    rec.blocked_count,
-                            "pending_count":    rec.pending_count,
-                            "flagged_subjects": rec.flagged_subjects,
-                            "suggested_action": rec.suggested_action,
-                        }
-                    except Exception as checker_err:
-                        print(f"⚠️  Inline checker error: {checker_err}")
 
         except Exception as scan_err:
             print(f"⚠️  Could not load scan data: {scan_err}")
+
+    # For Smart Enrollment without COR but WITH selected subjects
+    if not submission_data.document_verification_token and submission_data.extracted_subjects:
+        extracted_subjects = submission_data.extracted_subjects
+    
+    # Generate verification for either parsed COR subjects or Smart Enrollment subjects
+    if extracted_subjects and not verification_result:
+        try:
+            from src.modules.enrollment.prerequisite_checker import PrerequisiteChecker
+            checker = PrerequisiteChecker(database_session)
+            rec     = checker.check_subjects(
+                student_account_id=student_id,
+                subject_codes=extracted_subjects,
+            )
+            verification_result = [
+                {
+                    "subject_id":      r.subject_id,
+                    "subject_code":    r.subject_code,
+                    "subject_title":   r.subject_title,
+                    "credit_units":    r.credit_units,
+                    "status":          r.status,
+                    "prereq_code":     r.prereq_code,
+                    "prereq_title":    r.prereq_title,
+                    "prereq_status":   r.prereq_status,
+                    "blocking_reason": r.blocking_reason,
+                }
+                for r in rec.subject_results
+            ]
+            ai_recommendation = {
+                "verdict":          rec.verdict,
+                "pass_rate":        rec.pass_rate,
+                "available_count":  rec.available_count,
+                "blocked_count":    rec.blocked_count,
+                "pending_count":    rec.pending_count,
+                "flagged_subjects": rec.flagged_subjects,
+                "suggested_action": rec.suggested_action,
+            }
+        except Exception as checker_err:
+            print(f"⚠️  Inline checker error: {checker_err}")
 
     # ── Step 4: Build and persist the enrollment record 
     new_enrollment_record = models.StudentEnrollmentRequest(

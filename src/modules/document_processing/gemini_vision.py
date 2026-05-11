@@ -8,6 +8,9 @@ from PIL import Image
 
 from src.core.config import settings  
 class StudentID(BaseModel):
+    is_valid_document: bool = Field(
+        ..., description="True if the image is actually a valid university/school ID card. False if it is a random object, animal, or person's face only."
+    )
     student_id: Optional[str] = Field(
         None, description="The alphanumeric student ID number (e.g., 2021-00123)"
     )
@@ -26,6 +29,9 @@ class Subject(BaseModel):
 
 
 class COR(BaseModel):
+    is_valid_document: bool = Field(
+        ..., description="True if the image is actually a valid Certificate of Registration (COR). False if it is a random object, animal, or person's face only."
+    )
     subjects: List[Subject] = Field(
         ..., description="All enrolled academic subjects found on the COR."
     )
@@ -147,6 +153,12 @@ def _validate_id_payload(data: dict) -> str | None:
     if not data or not isinstance(data, dict):
         return "Extraction returned empty data. The image may be unreadable."
 
+    if not data.get("is_valid_document"):
+        return (
+            "The uploaded image does not appear to be a valid Student ID card. "
+            "Please upload a clear photo of your school ID."
+        )
+
     student_id = (data.get("student_id") or "").strip()
     full_name  = (data.get("full_name") or "").strip()
 
@@ -159,12 +171,14 @@ def _validate_id_payload(data: dict) -> str | None:
 
 
 def _validate_cor_payload(data: dict) -> str | None:
-    """
-    Returns an error message if the COR payload is unusable, or None if valid.
-    A payload is unusable if subjects list is empty or none have a valid code.
-    """
     if not data or not isinstance(data, dict):
         return "Extraction returned empty data. The image may be unreadable."
+
+    if not data.get("is_valid_document"):
+        return (
+            "The uploaded image does not appear to be a valid Certificate of Registration (COR). "
+            "Please upload a clear, high-resolution document."
+        )
 
     subjects = data.get("subjects") or []
 
@@ -214,18 +228,21 @@ class GeminiVisionService:
                 target_schema = StudentID
                 prompt = (
                     "You are an academic registrar's document scanner. "
-                    "Extract student details from this university ID card. "
-                    "Return null for any field that is obscured, damaged, or not visible. "
-                    "Do not guess or infer values that are not clearly printed."
+                    "Analyze the provided image and set is_valid_document to TRUE if and only if "
+                    "the image contains a physical or digital University/School ID card with readable text. "
+                    "If the image is just a person's face (selfie), an animal (like a monkey), or any random object, "
+                    "set is_valid_document to FALSE. "
+                    "If valid, extract student details: student_id, full_name, and course. "
+                    "Return null for any field that is obscured or not visible. Do not guess values."
                 )
             elif doc_type == "COR":
                 target_schema = COR
                 prompt = (
                     "You are an academic registrar's document scanner. "
-                    "Extract only enrolled academic subjects from this Certificate of Registration (COR). "
-                    "Include subject code, full subject name, and credit units for each subject. "
-                    "Ignore payment amounts, fees, peso totals, and administrative rows. "
-                    "Set total_units from the printed total line, not by summing yourself."
+                    "Set is_valid_document to TRUE if the image is a Certificate of Registration (COR). "
+                    "If it is not a document, set is_valid_document to FALSE. "
+                    "If valid, extract only enrolled academic subjects with their code, name, and credit units. "
+                    "Ignore payment amounts and administrative rows. Set total_units from the printed total line."
                 )
             else:
                 return {
@@ -240,10 +257,10 @@ class GeminiVisionService:
                 response_mime_type="application/json",
                 response_schema=target_schema,
                 safety_settings=[
-                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_NONE"),
-                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_NONE"),
-                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_NONE"),
-                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_NONE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HATE_SPEECH", threshold="BLOCK_LOW_AND_ABOVE"),
+                    types.SafetySetting(category="HARM_CATEGORY_HARASSMENT", threshold="BLOCK_LOW_AND_ABOVE"),
+                    types.SafetySetting(category="HARM_CATEGORY_SEXUALLY_EXPLICIT", threshold="BLOCK_LOW_AND_ABOVE"),
+                    types.SafetySetting(category="HARM_CATEGORY_DANGEROUS_CONTENT", threshold="BLOCK_LOW_AND_ABOVE"),
                 ]
             )
 
@@ -256,7 +273,7 @@ class GeminiVisionService:
                 )
             except APIError as e:
                 # 3. Fallback attempt using the EXACT SAME config
-                print(f"⚠️ Primary model {self.model_id} failed: {str(e)}. Attempting fallback...")
+                print(f"Primary model {self.model_id} failed: {str(e)}. Attempting fallback...")
                 response = self.client.models.generate_content(
                     model="gemini-1.5-flash",
                     contents=[image, prompt],
@@ -307,7 +324,7 @@ class GeminiVisionService:
         except APIError as api_error:
             # Correctly handle modern SDK API errors (like Quota Exceeded)
             error_msg = f"API Error: {api_error.message}" if hasattr(api_error, "message") else str(api_error)
-            print(f"🚨 API Exhausted or Failed: {error_msg}")
+            print(f"API Exhausted or Failed: {error_msg}")
             return {
                 "status": "ERROR", "doc_type": doc_type,
                 "extracted_data": {}, "confidence_score": 0.0,
@@ -317,7 +334,7 @@ class GeminiVisionService:
             
         except Exception as error:
             # Catch all other local python errors (e.g. image read failure)
-            print(f"🚨 Local Processing Error: {str(error)}")
+            print(f"Local Processing Error: {str(error)}")
             return {
                 "status": "ERROR", "doc_type": doc_type,
                 "extracted_data": {}, "confidence_score": 0.0,
