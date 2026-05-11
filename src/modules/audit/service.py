@@ -85,12 +85,22 @@ def log_event(
     if heuristic_score >= 75.0 and actor_email:
         from src.modules.auth import repository as auth_repo
         
-        auth_repo.lock_user_account(database_session=database_session, target_email=actor_email)
-        
-        if payload is None:
-            payload = {}
-        payload["threat_mitigation_engaged"] = True
-        payload["action_taken"] = "ACCOUNT_AUTO_SUSPENDED"
+        # ── BUG FIX: Don't suspend the Admin if they are doing their job late at night ──
+        user = auth_repo.fetch_user_by_email(database_session, actor_email)
+        is_admin = user and user.account_role == "ADMIN"
+
+        if not is_admin:
+            auth_repo.lock_user_account(database_session=database_session, target_email=actor_email)
+            
+            if payload is None:
+                payload = {}
+            payload["threat_mitigation_engaged"] = True
+            payload["action_taken"] = "ACCOUNT_AUTO_SUSPENDED"
+        else:
+            if payload is None:
+                payload = {}
+            payload["threat_mitigation_engaged"] = False
+            payload["action_taken"] = "ADMIN_EXEMPT_FROM_TRIPWIRE"
 
     return repository.create_event(
         database_session=database_session,
