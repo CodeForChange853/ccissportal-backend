@@ -12,16 +12,69 @@ triage_ai = SupportTriageEngine()
 
 # Student-facing
 
+from datetime import datetime, timedelta
+from src.modules.auth.models import UserAccount
+
+# Harassment / Explicit Content Filter
+BANNED_KEYWORDS = [
+    "pussy", "dumb", "money", "dick", "sex", "stupid", "idiot", 
+    "fuck", "shit", "bitch", "asshole", "kill", "die", "harass"
+]
+
 def process_new_support_ticket(
     database_session: Session,
     student_id: int,
     ticket_data: schemas.TicketSubmissionRequest,
-    actor_email: str | None = None,   # Added to prevent crash
-    ip_address: str | None = None,    # Added to prevent crash
+    actor_email: str | None = None,
+    ip_address: str | None = None,
 ) -> models.SupportTicket:
+    
+    user = database_session.query(UserAccount).filter(UserAccount.account_id == student_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
 
-    combined_text = f"{ticket_data.issue_subject} {ticket_data.issue_description}"
+    # 1. Rate Limiting: Max 2 tickets per 24 hours
+    one_day_ago = datetime.utcnow() - timedelta(days=1)
+    recent_tickets_count = database_session.query(models.SupportTicket).filter(
+        models.SupportTicket.student_account_id == student_id,
+        models.SupportTicket.created_at >= one_day_ago
+    ).count()
 
+    if recent_tickets_count >= 2:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="TICKET_LIMIT_REACHED: You can only submit 2 support tickets per 24 hours to prevent spam."
+        )
+
+    # 2. Content Filtering (Harassment/Explicit)
+    combined_text = f"{ticket_data.issue_subject} {ticket_data.issue_description}".lower()
+    found_violations = [word for word in BANNED_KEYWORDS if word in combined_text]
+
+    if found_violations:
+        user.violation_count += 1
+        database_session.commit()
+
+        if user.violation_count >= 3:
+            user.is_active_account = False
+            database_session.commit()
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "ACCOUNT_BANNED",
+                    "message": "Your account has been banned due to repeated violations of school rules and harassment policies. Please contact the Admin Office."
+                }
+            )
+        
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "code": "EXPLICIT_CONTENT_WARNING",
+                "violation_count": user.violation_count,
+                "message": "Explicit or harassing content detected. You are under supervision by the admin. If you reach 3 violations, your account will be permanently banned."
+            }
+        )
+
+    # 3. AI Triage & Creation
     predicted_department, confidence_score = triage_ai.predict_with_confidence(combined_text)
 
     new_ticket = models.SupportTicket(

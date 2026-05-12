@@ -56,6 +56,24 @@ def process_user_login(
         )
 
     if not user_account.is_active_account:
+        # Check if deactivation was due to violations (strikes)
+        if user_account.violation_count >= 3:
+            audit_service.log_event(
+                database_session=database_session,
+                event_type="LOGIN_BLOCKED_BANNED",
+                actor_id=user_account.account_id,
+                actor_email=user_account.email_address,
+                ip_address=ip_address,
+                payload={"reason": "violation_threshold_reached", "strikes": user_account.violation_count},
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={
+                    "code": "ACCOUNT_BANNED",
+                    "message": "Your account has been permanently banned due to repeated violations of academic integrity and harassment policies."
+                }
+            )
+
         audit_service.log_event(
             database_session=database_session,
             event_type="LOGIN_FAILED",
@@ -295,13 +313,19 @@ def process_user_registration(
 
     elif saved_account.account_role == "FACULTY":
         fallback_emp_id = f"FAC-{saved_account.account_id}"
+        
+        # Fetch global load cap from settings
+        from src.modules.settings.models import SystemSettings
+        sys_settings = database_session.query(SystemSettings).filter(SystemSettings.settings_id == 1).first()
+        global_max_load = sys_settings.global_max_teaching_load if sys_settings else 4
+
         faculty_profile = FacultyProfile(
             faculty_account_id=saved_account.account_id,
             first_name=registration_data.first_name or "Faculty",
             last_name=registration_data.last_name or "",
             employee_id=registration_data.employee_id or fallback_emp_id,
             academic_department=registration_data.academic_department or "General",
-            maximum_teaching_load=4,
+            maximum_teaching_load=global_max_load,
             current_teaching_load=0,
             is_available_for_classes=True,
         )

@@ -9,7 +9,7 @@ from src.modules.enrollment.models import (
 from src.modules.faculty.models import FacultyProfile, GradebookEntry
 from src.modules.document_processing.models import DocumentScanResult
 from src.modules.settings.models import SystemSettings
-from src.modules.support.models import SupportTicket
+from src.modules.support.models import SupportTicket, SystemAnnouncement
 from src.modules.audit.models import AuditEvent
 
 

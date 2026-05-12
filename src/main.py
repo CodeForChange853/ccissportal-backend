@@ -15,6 +15,7 @@ from src.modules.notifications.router import router as notifications_router
 
 from src.core.database_setup import SessionLocal
 from src.modules.settings.models import SystemSettings
+from src.modules.support.models import SystemAnnouncement
 
 app = FastAPI(
     title="University Campus System API (v2)",
@@ -46,6 +47,7 @@ async def maintenance_mode_middleware(request: Request, call_next):
         "/settings",
         "/system-init-secure-99",
         "/", # Health check
+        "/announcements",
     ]
     
     if any(request.url.path == p or request.url.path.startswith(p + "/") for p in exempt_paths):
@@ -102,11 +104,13 @@ def check_system_health():
     db = SessionLocal()
     m_status = False
     m_reason = ""
+    e_open = False
     try:
         s = db.query(SystemSettings).filter(SystemSettings.settings_id == 1).first()
         if s:
             m_status = s.is_maintenance_mode
             m_reason = s.maintenance_reason
+            e_open = s.is_enrollment_open
     except Exception:
         pass
     finally:
@@ -116,8 +120,28 @@ def check_system_health():
         "system_status": "Maintenance" if m_status else "Online",
         "maintenance_mode": m_status,
         "maintenance_reason": m_reason,
+        "enrollment_open": e_open,
         "allowed_origins": settings.allowed_origins_list,
     }
+
+@app.get("/announcements")
+def get_announcements():
+    db = SessionLocal()
+    try:
+        # Get latest 10 announcements
+        announcements = db.query(SystemAnnouncement).order_by(SystemAnnouncement.created_at.desc()).limit(10).all()
+        return [
+            {
+                "id": a.id,
+                "title": a.title,
+                "body": a.body,
+                "type": a.type,
+                "status": a.status,
+                "created_at": a.created_at.strftime("%B %d, %Y — %I:%M %p")
+            } for a in announcements
+        ]
+    finally:
+        db.close()
 
 # --- CORS CONFIGURATION (Outermost Layer) ---
 # We register this LAST so it wraps around ALL other middlewares, including maintenance mode.

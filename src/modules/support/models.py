@@ -19,3 +19,14 @@ class SupportTicket(Base):
     
     ticket_status = Column(String(50), default="OPEN", index=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+class SystemAnnouncement(Base):
+    """Stores professional system status updates, incidents, and maintenance logs."""
+    __tablename__ = "system_announcements"
+
+    id = Column(Integer, primary_key=True, index=True)
+    title = Column(String(200), nullable=False)
+    body = Column(Text, nullable=False)
+    type = Column(String(50), default="announcement") # incident, maintenance, announcement
+    status = Column(String(50), default="ACTIVE")    # ACTIVE, RESOLVED
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
