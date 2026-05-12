@@ -19,4 +19,5 @@ class DocumentScanResult(Base):
     error_message = Column(Text, nullable=True)
     confidence_score = Column(Float, nullable=True)
     document_type = Column(String(10), nullable=True)
+    file_hash = Column(String(64), index=True, nullable=True) # Unique document fingerprint
     date_scanned = Column(DateTime(timezone=True), server_default=func.now())

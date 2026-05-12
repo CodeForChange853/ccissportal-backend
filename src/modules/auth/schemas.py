@@ -19,7 +19,8 @@ class RegistrationRequest(BaseModel):
     email_address: EmailStr = Field(..., max_length=150)
     plain_text_password: str = Field(..., min_length=8, max_length=100)
     passkey_code: Optional[str] = Field(None, max_length=50)
-    document_verification_token: Optional[str] = Field(None, max_length=100)
+    id_verification_token: Optional[str] = Field(None, max_length=100)
+    cor_verification_token: Optional[str] = Field(None, max_length=100)
     account_role: Optional[str] = Field("STUDENT", max_length=20)
 
     #  Profile fields 

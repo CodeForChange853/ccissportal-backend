@@ -2,6 +2,7 @@ import shutil
 import uuid
 import os
 import json
+import hashlib
 
 from fastapi import APIRouter, Depends, UploadFile, File, BackgroundTasks, HTTPException, Request, status
 from sqlalchemy.orm import Session
@@ -30,7 +31,6 @@ def upload_and_scan_document(
 ):
     # ── 1. Validate File Size (5MB Limit) ─────────────────────────────
     MAX_SIZE = 5 * 1024 * 1024  # 5MB
-    # We seek to the end to get size, then back to 0
     uploaded_file.file.seek(0, os.SEEK_END)
     file_size = uploaded_file.file.tell()
     uploaded_file.file.seek(0)
@@ -49,13 +49,40 @@ def upload_and_scan_document(
             detail=f"Invalid file type '{uploaded_file.content_type}'. Only JPG, PNG, and PDF are allowed."
         )
 
+    # ── 3. Calculate File Hash (SHA-256) for Deduplication Cache ──
+    file_content = uploaded_file.file.read()
+    file_hash = hashlib.sha256(file_content).hexdigest()
+    uploaded_file.file.seek(0) # Reset pointer after reading
+
+    # ── 4. Check Deduplication Cache (Fast Reuse Path) ──
+    existing_scan = repository.fetch_successful_scan_by_hash(database_session, file_hash, document_type)
+    
+    if existing_scan:
+        # Generate a NEW token but REUSE the data immediately
+        new_token = str(uuid.uuid4())
+        repository.create_initial_scan_record(database_session, new_token, file_hash)
+        repository.update_scan_completion(
+            database_session=database_session,
+            token=new_token,
+            extracted_data=existing_scan.extracted_ai_data,
+            confidence_score=existing_scan.confidence_score,
+            document_type=document_type
+        )
+        
+        return schemas.ScanInitiationResponse(
+            secure_scan_token=new_token,
+            processing_status="COMPLETED", # Near-instant reuse!
+            message="Document fingerprint recognized. Reusing previous verified analysis.",
+        )
+
+    # ── 5. Standard Background Processing Path ──
     secure_token   = str(uuid.uuid4())
     temp_file_path = f"temp_uploads/{secure_token}_{uploaded_file.filename}"
 
     with open(temp_file_path, "wb") as buffer:
-        shutil.copyfileobj(uploaded_file.file, buffer)
+        buffer.write(file_content)
 
-    repository.create_initial_scan_record(database_session, secure_token)
+    repository.create_initial_scan_record(database_session, secure_token, file_hash)
 
     background_tasks.add_task(
         service.execute_background_ai_scan,
@@ -80,9 +107,7 @@ def check_scan_status(
     scan_token: str,
     database_session: Session = Depends(get_database_session),
 ):
-
     scan_record = repository.fetch_scan_by_token(database_session, scan_token)
-
     if scan_record is None:
         raise HTTPException(status_code=404, detail="Scan token not found.")
 
@@ -98,9 +123,7 @@ def get_verification_score_card(
     scan_token: str,
     database_session: Session = Depends(get_database_session),
 ):
-
     scan_record = repository.fetch_scan_by_token(database_session, scan_token)
-
     if scan_record is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

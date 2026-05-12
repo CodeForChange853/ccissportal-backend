@@ -7,7 +7,7 @@ sys.path.append(
 from passlib.context import CryptContext
 from sqlalchemy.orm import Session
 
-from src.core.database_setup import SessionLocal
+from src.core.database_setup import SessionLocal, Base, database_engine
 from src.modules.auth.models import UserAccount
 from src.modules.enrollment.models import (
     CurriculumSubject, StudentProfile,
@@ -348,9 +348,12 @@ def _seed_test_student(db: Session, admin_account: UserAccount) -> None:
 # ── Entrypoint ─────────────────────────────────────────────────────────────
 
 def seed_database() -> None:
+    # Ensure tables exist before seeding
+    Base.metadata.create_all(bind=database_engine)
+    
     db = SessionLocal()
     try:
-        print("\n── Seeding database (Phase 1 minimal) ────────────────────────")
+        print("\n-- Seeding database (Phase 1 minimal) ------------------------")
 
         _seed_settings(db)
         _seed_curriculum(db)
@@ -360,16 +363,16 @@ def seed_database() -> None:
 
         db.commit()
 
-        print("\n✅  Seeding complete.")
-        print("─────────────────────────────────────────────────────────────")
-        print("  Admin   → admin@university.edu         / admin123")
-        print("  Student → test.student@university.edu  / student123")
+        print("\n[OK]  Seeding complete.")
+        print("-------------------------------------------------------------")
+        print("  Admin   -> admin@university.edu         / admin123")
+        print("  Student -> test.student@university.edu  / student123")
         print("            3rd Year, 2nd Semester, BSCS")
         print("            40 subjects PASSED | 5 IN PROGRESS (3rd yr 2nd sem)")
-        print("─────────────────────────────────────────────────────────────\n")
+        print("-------------------------------------------------------------\n")
 
     except Exception as err:
-        print(f"\n❌  Seeding error: {err}")
+        print(f"\n[ERROR]  Seeding error: {err}")
         db.rollback()
         raise
     finally:

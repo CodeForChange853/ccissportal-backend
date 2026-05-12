@@ -76,3 +76,6 @@ class StudentProfile(Base):
 
 
     current_semester = Column(Integer, default=1)
+    is_ai_verified   = Column(Boolean, default=False, nullable=False)
+    is_irregular     = Column(Boolean, default=False, nullable=False)
+    security_flags   = Column(JSON, nullable=True) # Tracks reasons for flagging

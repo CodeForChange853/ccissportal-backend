@@ -32,6 +32,12 @@ class COR(BaseModel):
     is_valid_document: bool = Field(
         ..., description="True if the image is actually a valid Certificate of Registration (COR). False if it is a random object, animal, or person's face only."
     )
+    full_name: Optional[str] = Field(
+        None, description="The full name of the student as printed on the COR header"
+    )
+    student_id: Optional[str] = Field(
+        None, description="The student ID number (e.g. 23-10045) as printed on the COR"
+    )
     subjects: List[Subject] = Field(
         ..., description="All enrolled academic subjects found on the COR."
     )
@@ -241,7 +247,8 @@ class GeminiVisionService:
                     "You are an academic registrar's document scanner. "
                     "Set is_valid_document to TRUE if the image is a Certificate of Registration (COR). "
                     "If it is not a document, set is_valid_document to FALSE. "
-                    "If valid, extract only enrolled academic subjects with their code, name, and credit units. "
+                    "If valid, extract the student's full_name and student_id from the header, "
+                    "and extract all enrolled academic subjects with their code, name, and credit units. "
                     "Ignore payment amounts and administrative rows. Set total_units from the printed total line."
                 )
             else:

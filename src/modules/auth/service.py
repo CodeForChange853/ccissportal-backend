@@ -16,19 +16,11 @@ from src.modules.audit import service as audit_service
 
 password_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
-
-
-# Utility helpers
-
 def verify_password(plain_text_password: str, hashed_password: str) -> bool:
     return password_context.verify(plain_text_password, hashed_password)
 
-
 def hash_new_password(plain_text_password: str) -> str:
     return password_context.hash(plain_text_password)
-
-# Login
-
 
 def process_user_login(
     database_session: Session,
@@ -56,7 +48,6 @@ def process_user_login(
         )
 
     if not user_account.is_active_account:
-        # Check if deactivation was due to violations (strikes)
         if user_account.violation_count >= 3:
             audit_service.log_event(
                 database_session=database_session,
@@ -101,7 +92,6 @@ def process_user_login(
             detail="The password provided is incorrect.",
         )
 
-    # --- MAINTENANCE LOCK: Reject non-admins if system is locked ---
     from src.modules.settings.models import SystemSettings
     sys_settings = database_session.query(SystemSettings).filter(SystemSettings.settings_id == 1).first()
     if sys_settings and sys_settings.is_maintenance_mode:
@@ -119,10 +109,9 @@ def process_user_login(
                 detail={
                     "maintenance": True,
                     "reason": sys_settings.maintenance_reason or "Neural Infrastructure Recalibration",
-                    "message": sys_settings.maintenance_message or "The NexEnroll AI Core is currently undergoing deep-layer synchronization to optimize semestral load balancing and ensure total data integrity. We are evolving to provide you with a faster, more intelligent academic journey."
+                    "message": sys_settings.maintenance_message or "The NexEnroll AI Core is currently undergoing deep-layer synchronization to optimize semestral load balancing and ensure total data integrity."
                 }
             )
-
 
     secure_access_token = create_secure_access_token(
         data={
@@ -147,11 +136,6 @@ def process_user_login(
         account_id=user_account.account_id,
     )
 
-
-
-# Registration
-
-
 def process_user_registration(
     database_session: Session,
     registration_data: schemas.RegistrationRequest,
@@ -159,28 +143,21 @@ def process_user_registration(
     skip_passkey: bool = False,
 ) -> schemas.SuccessfulLoginResponse:
  
-    # ── Step 1: Passkey Gate (Students only, unless bypassed) 
     if registration_data.account_role == "STUDENT" and not skip_passkey:
-
-        
         try:
             active_passkey = get_active_passkey(database_session=database_session)
         except HTTPException:
-           
             raise HTTPException(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                detail="System settings not initialised. "
-                       "Please contact the administrator.",
+                detail="System settings not initialised. Please contact the administrator.",
             )
 
         if registration_data.passkey_code != active_passkey:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="Registration denied: Invalid student passkey. "
-                       "Please obtain the current passkey from your department.",
+                detail="Registration denied: Invalid student passkey.",
             )
 
-    #   Duplicate email guard 
     existing_account = repository.get_user_account_by_email(
         database_session=database_session,
         email_address=registration_data.email_address,
@@ -192,9 +169,7 @@ def process_user_registration(
             detail=f"An account for '{registration_data.email_address}' already exists.",
         )
 
-
     hashed_password = hash_new_password(registration_data.plain_text_password)
-
     new_user_account = models.UserAccount(
         email_address=registration_data.email_address,
         hashed_password=hashed_password,
@@ -202,192 +177,170 @@ def process_user_registration(
         is_active_account=True,
     )
 
-    saved_account = repository.save_new_user_account(
-        database_session=database_session,
-        new_account=new_user_account,
-    )
+    try:
+        # ATOMIC TRANSACTION START
+        database_session.add(new_user_account)
+        database_session.flush() 
+        saved_account = new_user_account
 
-    if saved_account.account_role == "STUDENT":
-        # AI-Inferred Academic Level
-        computed_year = 1
-        computed_sem = 1
-        matched_subs = []
+        if saved_account.account_role == "STUDENT":
+            computed_year = 1
+            computed_sem = 1
+            matched_subs = []
+            is_irregular = False
+            is_ai_verified = bool(registration_data.id_verification_token)
 
-        if registration_data.document_verification_token:
-            from src.modules.document_processing.repository import fetch_scan_by_token
-            
-            scan_rec = fetch_scan_by_token(database_session, registration_data.document_verification_token)
-            if scan_rec and scan_rec.extracted_ai_data:
-                try:
-                    payload = json.loads(scan_rec.extracted_ai_data)
-                    subjects_raw = payload.get("extracted_data", {}).get("subjects", [])
-                    scanned_subject_codes = [s["code"] for s in subjects_raw if s.get("code")]
-                    
-                    if scanned_subject_codes:
-                        matched_subs = database_session.query(CurriculumSubject).filter(
-                            CurriculumSubject.subject_code.in_(scanned_subject_codes)
-                        ).all()
+            if registration_data.cor_verification_token:
+                from src.modules.document_processing.repository import fetch_scan_by_token
+                scan_rec = fetch_scan_by_token(database_session, registration_data.cor_verification_token)
+                if scan_rec and scan_rec.extracted_ai_data:
+                    try:
+                        payload = json.loads(scan_rec.extracted_ai_data)
+                        ex_data = payload.get("extracted_data", {})
+                        subjects_raw = ex_data.get("subjects", [])
+                        scanned_subject_codes = [s["code"] for s in subjects_raw if s.get("code")]
                         
-                        if matched_subs:
-                            computed_year = max(s.target_year_level for s in matched_subs)
-                            highest_year_subs = [s for s in matched_subs if s.target_year_level == computed_year]
-                            computed_sem = max(s.target_semester for s in highest_year_subs)
-                except Exception:
-                    pass
+                        cor_name = (ex_data.get("full_name") or "").lower().strip()
+                        cor_id = (ex_data.get("student_id") or "").lower().strip()
+                        claim_name = (f"{registration_data.first_name} {registration_data.last_name}").lower().strip()
+                        claim_id = (registration_data.student_number or "").lower().strip()
+                        
+                        if cor_name and cor_name != claim_name:
+                             raise HTTPException(
+                                 status_code=403, 
+                                 detail="SECURITY VIOLATION: The uploaded document belongs to another user. Unauthorized use of academic records is a strictly prohibited violation and has been logged for potential blacklisting."
+                             )
+                        
+                        if cor_id and claim_id and cor_id != claim_id:
+                             raise HTTPException(
+                                 status_code=403, 
+                                 detail="SECURITY VIOLATION: Student ID mismatch detected. Document use must match account identity. Continued violations will lead to permanent account suspension."
+                             )
+                        
+                        if scanned_subject_codes:
+                            matched_subs = database_session.query(CurriculumSubject).filter(
+                                CurriculumSubject.subject_code.in_(scanned_subject_codes)
+                            ).all()
+                            if matched_subs:
+                                year_levels = {s.target_year_level for s in matched_subs}
+                                computed_year = max(year_levels)
+                                highest_year_subs = [s for s in matched_subs if s.target_year_level == computed_year]
+                                computed_sem = max(s.target_semester for s in highest_year_subs)
+                                if len(year_levels) > 1:
+                                    is_irregular = True
+                    except HTTPException:
+                        raise
+                    except Exception:
+                        pass
 
-        student_profile = StudentProfile(
-            student_account_id=saved_account.account_id,
-            first_name=registration_data.first_name or "Student",
-            last_name=registration_data.last_name or "",
-            student_number=registration_data.student_number or None,
-            current_course=registration_data.course or "BSCS",
-            current_year_level=computed_year,
-            current_semester=computed_sem,
+            student_profile = StudentProfile(
+                student_account_id=saved_account.account_id,
+                first_name=registration_data.first_name or "Student",
+                last_name=registration_data.last_name or "",
+                student_number=registration_data.student_number or None,
+                current_course=registration_data.course or "BSCS",
+                current_year_level=computed_year,
+                current_semester=computed_sem,
+                is_ai_verified=is_ai_verified,
+                is_irregular=is_irregular,
+            )
+            database_session.add(student_profile)
+
+            if computed_year > 1 or computed_sem > 1:
+                course_name = student_profile.current_course.upper()
+                normalized_course = "BSCS" if "COMPUTER SCIENCE" in course_name else ("BSIT" if "INFORMATION TECHNOLOGY" in course_name else course_name)
+                historic_subs = database_session.query(CurriculumSubject).filter(
+                    (CurriculumSubject.target_year_level < computed_year) |
+                    ((CurriculumSubject.target_year_level == computed_year) & (CurriculumSubject.target_semester < computed_sem))
+                ).filter(CurriculumSubject.course == normalized_course).all()
+
+                first_faculty = database_session.query(FacultyProfile).first()
+                fallback_faculty_id = first_faculty.faculty_account_id if first_faculty else None
+
+                if fallback_faculty_id:
+                    for subj in (historic_subs + matched_subs):
+                        status_str = "PASSED" if subj in historic_subs else "NOT STARTED"
+                        grade_val = 2.0 if subj in historic_subs else None
+                        
+                        assigned = database_session.query(GradebookEntry).filter(
+                            GradebookEntry.curriculum_subject_id == subj.subject_id,
+                            GradebookEntry.student_account_id == None
+                        ).first()
+                        fac_id = assigned.faculty_account_id if assigned else fallback_faculty_id
+                        
+                        database_session.add(GradebookEntry(
+                            student_account_id=saved_account.account_id,
+                            faculty_account_id=fac_id,
+                            curriculum_subject_id=subj.subject_id,
+                            midterm_grade=grade_val,
+                            system_grade=grade_val,
+                            final_grade=grade_val,
+                            completion_status=status_str
+                        ))
+
+        elif saved_account.account_role == "FACULTY":
+            fallback_emp_id = f"FAC-{saved_account.account_id}"
+            from src.modules.settings.models import SystemSettings
+            sys_settings = database_session.query(SystemSettings).filter(SystemSettings.settings_id == 1).first()
+            global_max_load = sys_settings.global_max_teaching_load if sys_settings else 4
+
+            faculty_profile = FacultyProfile(
+                faculty_account_id=saved_account.account_id,
+                first_name=registration_data.first_name or "Faculty",
+                last_name=registration_data.last_name or "",
+                employee_id=registration_data.employee_id or fallback_emp_id,
+                academic_department=registration_data.academic_department or "General",
+                maximum_teaching_load=global_max_load,
+                current_teaching_load=0,
+                is_available_for_classes=True,
+            )
+            database_session.add(faculty_profile)
+
+        secure_access_token = create_secure_access_token(
+            data={"sub": saved_account.email_address, "role": saved_account.account_role, "id": saved_account.account_id}
         )
-        database_session.add(student_profile)
-        database_session.commit()
 
-        # Historical Grade Auto-Loader
-        if computed_year > 1 or computed_sem > 1:
-
-            
-            course_name = student_profile.current_course.upper()
-            if "COMPUTER SCIENCE" in course_name:
-                normalized_course = "BSCS"
-            elif "INFORMATION TECHNOLOGY" in course_name:
-                normalized_course = "BSIT"
-            else:
-                normalized_course = course_name
-
-            historic_subs = database_session.query(CurriculumSubject).filter(
-                (CurriculumSubject.target_year_level < computed_year) |
-                ((CurriculumSubject.target_year_level == computed_year) & (CurriculumSubject.target_semester < computed_sem))
-            ).filter(CurriculumSubject.course == normalized_course).all()
-
-            first_faculty = database_session.query(FacultyProfile).first()
-            fallback_faculty_id = first_faculty.faculty_account_id if first_faculty else None
-
-            if fallback_faculty_id and historic_subs:
-                for subj in historic_subs:
-                    assigned = database_session.query(GradebookEntry).filter(
-                        GradebookEntry.curriculum_subject_id == subj.subject_id,
-                        GradebookEntry.student_account_id == None
-                    ).first()
-                    
-                    fac_id = assigned.faculty_account_id if assigned else fallback_faculty_id
-                    
-                    gh_entry = GradebookEntry(
-                        student_account_id=saved_account.account_id,
-                        faculty_account_id=fac_id,
-                        curriculum_subject_id=subj.subject_id,
-                        midterm_grade=2.0,
-                        system_grade=2.0,
-                        final_grade=2.0,
-                        completion_status="PASSED"
-                    )
-                    database_session.add(gh_entry)
-                
-                database_session.commit()
-
-            if fallback_faculty_id and matched_subs:
-                for subj in matched_subs:
-                    assigned = database_session.query(GradebookEntry).filter(
-                        GradebookEntry.curriculum_subject_id == subj.subject_id,
-                        GradebookEntry.student_account_id == None
-                    ).first()
-                    
-                    fac_id = assigned.faculty_account_id if assigned else fallback_faculty_id
-                    
-                    curr_entry = GradebookEntry(
-                        student_account_id=saved_account.account_id,
-                        faculty_account_id=fac_id,
-                        curriculum_subject_id=subj.subject_id,
-                        midterm_grade=None,
-                        system_grade=None,
-                        final_grade=None,
-                        completion_status="NOT STARTED"
-                    )
-                    database_session.add(curr_entry)
-                
-                database_session.commit()
-
-    elif saved_account.account_role == "FACULTY":
-        fallback_emp_id = f"FAC-{saved_account.account_id}"
-        
-        # Fetch global load cap from settings
-        from src.modules.settings.models import SystemSettings
-        sys_settings = database_session.query(SystemSettings).filter(SystemSettings.settings_id == 1).first()
-        global_max_load = sys_settings.global_max_teaching_load if sys_settings else 4
-
-        faculty_profile = FacultyProfile(
-            faculty_account_id=saved_account.account_id,
-            first_name=registration_data.first_name or "Faculty",
-            last_name=registration_data.last_name or "",
-            employee_id=registration_data.employee_id or fallback_emp_id,
-            academic_department=registration_data.academic_department or "General",
-            maximum_teaching_load=global_max_load,
-            current_teaching_load=0,
-            is_available_for_classes=True,
+        audit_service.log_event(
+            database_session=database_session,
+            event_type="USER_REGISTERED",
+            actor_id=saved_account.account_id,
+            actor_email=saved_account.email_address,
+            ip_address=ip_address,
+            payload={"role": saved_account.account_role},
         )
-        database_session.add(faculty_profile)
+
         database_session.commit()
-    #  Return a signed token 
-    secure_access_token = create_secure_access_token(
-        data={
-            "sub":  saved_account.email_address,
-            "role": saved_account.account_role,
-            "id":   saved_account.account_id,
-        }
-    )
+        database_session.refresh(saved_account)
 
-    audit_service.log_event(
-        database_session=database_session,
-        event_type="USER_REGISTERED",
-        actor_id=saved_account.account_id,
-        actor_email=saved_account.email_address,
-        ip_address=ip_address,
-        payload={"role": saved_account.account_role},
-    )
+        return schemas.SuccessfulLoginResponse(
+            access_token=secure_access_token,
+            account_role=saved_account.account_role,
+            account_id=saved_account.account_id,
+        )
 
-    return schemas.SuccessfulLoginResponse(
-        access_token=secure_access_token,
-        account_role=saved_account.account_role,
-        account_id=saved_account.account_id,
-    )
-
+    except Exception as e:
+        database_session.rollback()
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Registration failed: {str(e)}"
+        )
 
 def validate_pre_registration(
     database_session: Session,
     data: schemas.PreRegistrationValidationRequest,
 ) -> bool:
-    """
-    Checks if the passkey is correct and the student number is not already registered.
-    Used on the Landing Page to prevent random access.
-    """
-    # 1. Passkey Check
     try:
         active_passkey = get_active_passkey(database_session=database_session)
     except HTTPException:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="System settings not initialized. Contact Admin.",
-        )
+        raise HTTPException(status_code=500, detail="System settings not initialized.")
 
     if data.passkey_code != active_passkey:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Invalid system passkey. Access denied.",
-        )
+        raise HTTPException(status_code=403, detail="Invalid system passkey.")
 
-    # 2. Student Number Check
-    existing_profile = database_session.query(StudentProfile).filter(
-        StudentProfile.student_number == data.student_number
-    ).first()
-
+    existing_profile = database_session.query(StudentProfile).filter(StudentProfile.student_number == data.student_number).first()
     if existing_profile:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="This student number is already registered or in use.",
-        )
+        raise HTTPException(status_code=400, detail="This student number is already registered.")
 
     return True
