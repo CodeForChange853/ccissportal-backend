@@ -126,8 +126,47 @@ def fetch_all_faculty_for_admin(
             "current_teaching_load":    profile.current_teaching_load,
             "maximum_teaching_load":    profile.maximum_teaching_load,
             "is_available_for_classes": profile.is_available_for_classes,
+            "specialization_tags":      profile.specialization_tags,
+            "performance_score":        profile.performance_score,
         })
     return result
+
+def fetch_all_faculty_profiles(database_session: Session) -> list:
+    from src.modules.auth.models import UserAccount
+    rows = (
+        database_session.query(FacultyProfile, UserAccount)
+        .join(UserAccount, UserAccount.account_id == FacultyProfile.faculty_account_id)
+        .filter(UserAccount.account_role == "FACULTY")
+        .all()
+    )
+    return [(profile, account) for profile, account in rows]
+
+
+def fetch_faculty_avg_grade(database_session: Session, faculty_account_id: int) -> float | None:
+    from sqlalchemy import func as sqlfunc
+    result = (
+        database_session.query(sqlfunc.avg(GradebookEntry.final_grade))
+        .filter(
+            GradebookEntry.faculty_account_id == faculty_account_id,
+            GradebookEntry.student_account_id != None,
+            GradebookEntry.final_grade != None,
+        )
+        .scalar()
+    )
+    return float(result) if result is not None else None
+
+
+def update_faculty_specialization(
+    database_session: Session, faculty_account_id: int, tags: str
+) -> FacultyProfile | None:
+    profile = fetch_faculty_profile_by_account(database_session, faculty_account_id)
+    if profile is None:
+        return None
+    profile.specialization_tags = tags
+    database_session.commit()
+    database_session.refresh(profile)
+    return profile
+
 
 def fetch_class_roster_by_subject(
     database_session: Session,

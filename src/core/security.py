@@ -1,5 +1,5 @@
 # backend-v2/src/core/security.py
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from jose import JWTError, jwt
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -12,13 +12,41 @@ from src.modules.auth.models import UserAccount
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/authentication/login")
 
-# Token
+ACCESS_TOKEN_EXPIRE_MINUTES = 15
+REFRESH_TOKEN_EXPIRE_DAYS  = 7
+
+
 def create_secure_access_token(data: dict) -> str:
     payload = data.copy()
-    payload["exp"] = datetime.utcnow() + timedelta(
-        minutes=settings.ACCESS_TOKEN_EXPIRE_MINUTES
-    )
+    payload["exp"] = datetime.now(timezone.utc) + timedelta(minutes=ACCESS_TOKEN_EXPIRE_MINUTES)
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def create_refresh_token(data: dict) -> str:
+    payload = {
+        "sub":  data["sub"],
+        "role": data.get("role"),
+        "id":   data.get("id"),
+        "type": "refresh",
+    }
+    payload["exp"] = datetime.now(timezone.utc) + timedelta(days=REFRESH_TOKEN_EXPIRE_DAYS)
+    return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
+
+
+def decode_refresh_token(token: str) -> dict:
+    try:
+        payload = jwt.decode(token, settings.SECRET_KEY, algorithms=[settings.ALGORITHM])
+    except JWTError:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token is invalid or expired. Please log in again.",
+        )
+    if payload.get("type") != "refresh":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid token type.",
+        )
+    return payload
 
 
 # Base identity dependency
@@ -92,10 +120,34 @@ def require_faculty(
 def require_student(
     current_user: UserAccount = Depends(get_current_user),
 ) -> UserAccount:
-    
+
     if current_user.account_role != "STUDENT":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access Denied: Only students can perform this action.",
+        )
+    return current_user
+
+
+def require_secretary(
+    current_user: UserAccount = Depends(get_current_user),
+) -> UserAccount:
+
+    if current_user.account_role != "SECRETARY":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access Denied: Only secretaries can perform this action.",
+        )
+    return current_user
+
+
+def require_admin_or_secretary(
+    current_user: UserAccount = Depends(get_current_user),
+) -> UserAccount:
+
+    if current_user.account_role not in ("ADMIN", "SECRETARY"):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Access Denied: Administrator or Secretary access required.",
         )
     return current_user

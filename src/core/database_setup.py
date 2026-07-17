@@ -5,11 +5,11 @@ from src.core.config import settings
 
 database_engine = create_engine(
     settings.DATABASE_URL,
-    pool_pre_ping=True,   
-    pool_size=10,         
-    max_overflow=20,      
-    pool_timeout=30,      
-    pool_recycle=1800,    
+    pool_pre_ping=True,
+    pool_size=5,        # 5 base connections per worker — safe for Supabase free (60 conn cap)
+    max_overflow=5,     # burst to 10 max; 2 Render workers = 20 total, leaves headroom
+    pool_timeout=30,
+    pool_recycle=1800,
     echo=False,
 )
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=database_engine)

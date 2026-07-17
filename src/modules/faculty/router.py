@@ -61,10 +61,36 @@ def list_all_faculty(
     database_session: Session = Depends(get_database_session),
     admin: UserAccount = Depends(require_admin),
 ):
- 
     return repository.fetch_all_faculty_for_admin(
         database_session=database_session
     )
+
+
+# SE-02 — Intelligent matching endpoints
+
+@faculty_router.get("/admin/faculty/match", response_model=schemas.FacultyMatchResponse)
+def get_faculty_match_for_subject(
+    subject_id: int,
+    database_session: Session = Depends(get_database_session),
+    _: UserAccount = Depends(require_admin),
+):
+    return service.get_faculty_recommendations(database_session, subject_id)
+
+
+@faculty_router.patch("/admin/faculty/{account_id}/specialization")
+def update_faculty_specialization(
+    account_id: int,
+    body: schemas.SpecializationUpdateRequest,
+    database_session: Session = Depends(get_database_session),
+    _: UserAccount = Depends(require_admin),
+):
+    profile = repository.update_faculty_specialization(
+        database_session, account_id, body.specialization_tags
+    )
+    if profile is None:
+        from fastapi import HTTPException
+        raise HTTPException(status_code=404, detail="Faculty profile not found.")
+    return {"message": "Specialization updated.", "account_id": account_id}
 
 
 # FACULTY ROUTES

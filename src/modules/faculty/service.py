@@ -8,6 +8,103 @@ from src.modules.audit import service as audit_service
 from src.modules.enrollment.models import CurriculumSubject
 
 
+# ── SE-02: Intelligent Faculty-Subject Matching ───────────────────────────────
+
+def _specialization_score(faculty, subject) -> int:
+    import json
+    dept = (faculty.academic_department or '').lower()
+    try:
+        tags = [t.lower() for t in json.loads(faculty.specialization_tags or '[]')]
+    except Exception:
+        tags = []
+
+    code = (subject.subject_code or '').lower()
+    title = (subject.subject_title or '').lower()
+    code_prefix = code.split()[0] if code.split() else ''
+    all_faculty = dept + ' ' + ' '.join(tags)
+
+    hits, total = 0, 0
+    if code_prefix:
+        total += 1
+        if code_prefix in all_faculty:
+            hits += 1
+    keywords = [w for w in title.split() if len(w) > 4][:6]
+    for word in keywords:
+        total += 1
+        if word in all_faculty:
+            hits += 1
+
+    if total == 0:
+        return 50
+    return round((hits / total) * 100)
+
+
+def get_faculty_recommendations(
+    database_session: Session,
+    subject_id: int,
+) -> schemas.FacultyMatchResponse:
+    subject = database_session.query(CurriculumSubject).filter(
+        CurriculumSubject.subject_id == subject_id
+    ).first()
+    if subject is None:
+        raise HTTPException(status_code=404, detail=f"Subject {subject_id} not found.")
+
+    rows = repository.fetch_all_faculty_profiles(database_session)
+    candidates = []
+
+    for profile, account in rows:
+        # Specialization (40%)
+        spec = _specialization_score(profile, subject)
+
+        # Historical performance (30%) — avg final_grade normalized 0-100
+        avg_grade = repository.fetch_faculty_avg_grade(database_session, profile.faculty_account_id)
+        if avg_grade is None:
+            perf = 50  # neutral when no history
+        else:
+            # grades are 0–100 percentage scale
+            perf = min(round(avg_grade), 100)
+
+        # Load utilization (20%) — more free capacity = higher score
+        max_load = max(profile.maximum_teaching_load, 1)
+        free_ratio = 1.0 - (profile.current_teaching_load / max_load)
+        load = round(free_ratio * 100)
+
+        # Availability (10%)
+        avail = 100 if profile.is_available_for_classes else 0
+
+        score = round(spec * 0.40 + perf * 0.30 + load * 0.20 + avail * 0.10)
+
+        candidates.append(schemas.FacultySuitabilityItem(
+            account_id=account.account_id,
+            email_address=account.email_address,
+            first_name=profile.first_name,
+            last_name=profile.last_name,
+            academic_department=profile.academic_department,
+            current_teaching_load=profile.current_teaching_load,
+            maximum_teaching_load=profile.maximum_teaching_load,
+            specialization_tags=profile.specialization_tags,
+            suitability_score=score,
+            breakdown=schemas.ScoreBreakdown(
+                specialization=spec,
+                performance=perf,
+                load=load,
+                availability=avail,
+            ),
+            is_top_pick=False,
+        ))
+
+    candidates.sort(key=lambda c: c.suitability_score, reverse=True)
+    if candidates:
+        candidates[0] = candidates[0].model_copy(update={"is_top_pick": True})
+
+    return schemas.FacultyMatchResponse(
+        subject_id=subject.subject_id,
+        subject_code=subject.subject_code,
+        subject_title=subject.subject_title,
+        candidates=candidates,
+    )
+
+
 def bulk_assign_faculty_load(
     database_session: Session,
     assignment_data: schemas.BulkFacultyAssignmentRequest,
@@ -86,6 +183,20 @@ def bulk_assign_faculty_load(
     database_session.commit()
     database_session.refresh(professor_profile)
 
+    # SE-02: Detect override — check if top recommendation was bypassed
+    override_subjects = []
+    for sid in subjects_to_assign:
+        try:
+            match = get_faculty_recommendations(database_session, sid)
+            if match.candidates and match.candidates[0].account_id != assignment_data.faculty_account_id:
+                override_subjects.append({
+                    "subject_id": sid,
+                    "recommended_account_id": match.candidates[0].account_id,
+                    "recommended_score": match.candidates[0].suitability_score,
+                })
+        except Exception:
+            pass
+
     audit_service.log_event(
         database_session=database_session,
         event_type="FACULTY_BULK_ASSIGNED",
@@ -98,6 +209,7 @@ def bulk_assign_faculty_load(
             "assigned_subject_ids": subjects_to_assign,
             "new_load":             professor_profile.current_teaching_load,
             "max_load":             professor_profile.maximum_teaching_load,
+            "recommendation_overrides": override_subjects if override_subjects else None,
         },
     )
 
@@ -172,7 +284,18 @@ def evaluate_and_assign_faculty_load(
     database_session.commit()
     database_session.refresh(professor_profile)
 
-    #  Audit emit 
+    # SE-02: Detect override
+    override_info = None
+    try:
+        match = get_faculty_recommendations(database_session, assignment_data.curriculum_subject_id)
+        if match.candidates and match.candidates[0].account_id != assignment_data.faculty_account_id:
+            override_info = {
+                "recommended_account_id": match.candidates[0].account_id,
+                "recommended_score": match.candidates[0].suitability_score,
+            }
+    except Exception:
+        pass
+
     audit_service.log_event(
         database_session=database_session,
         event_type="FACULTY_ASSIGNED",
@@ -182,9 +305,10 @@ def evaluate_and_assign_faculty_load(
         target_id=assignment_data.faculty_account_id,
         ip_address=ip_address,
         payload={
-            "subject_id":   assignment_data.curriculum_subject_id,
-            "new_load":     professor_profile.current_teaching_load,
-            "max_load":     professor_profile.maximum_teaching_load,
+            "subject_id":              assignment_data.curriculum_subject_id,
+            "new_load":                professor_profile.current_teaching_load,
+            "max_load":                professor_profile.maximum_teaching_load,
+            "recommendation_override": override_info,
         },
     )
 

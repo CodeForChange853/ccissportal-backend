@@ -10,7 +10,7 @@ from src.modules.enrollment.models import StudentProfile, CurriculumSubject
 from src.modules.faculty.models import FacultyProfile, GradebookEntry
 
 from . import schemas, repository, models
-from src.core.security import create_secure_access_token
+from src.core.security import create_secure_access_token, create_refresh_token, decode_refresh_token
 from src.modules.settings.service import get_active_passkey
 from src.modules.audit import service as audit_service
 
@@ -95,7 +95,7 @@ def process_user_login(
     from src.modules.settings.models import SystemSettings
     sys_settings = database_session.query(SystemSettings).filter(SystemSettings.settings_id == 1).first()
     if sys_settings and sys_settings.is_maintenance_mode:
-        if user_account.account_role != "ADMIN":
+        if user_account.account_role not in ("ADMIN", "SECRETARY"):
             audit_service.log_event(
                 database_session=database_session,
                 event_type="LOGIN_BLOCKED_MAINTENANCE",
@@ -158,7 +158,7 @@ def process_user_registration(
                 detail="Registration denied: Invalid student passkey.",
             )
 
-    existing_account = repository.get_user_account_by_email(
+    existing_account = repository.fetch_user_by_email(
         database_session=database_session,
         email_address=registration_data.email_address,
     )
@@ -258,24 +258,38 @@ def process_user_registration(
                 fallback_faculty_id = first_faculty.faculty_account_id if first_faculty else None
 
                 if fallback_faculty_id:
-                    for subj in (historic_subs + matched_subs):
-                        status_str = "PASSED" if subj in historic_subs else "NOT STARTED"
-                        grade_val = 2.0 if subj in historic_subs else None
-                        
-                        assigned = database_session.query(GradebookEntry).filter(
-                            GradebookEntry.curriculum_subject_id == subj.subject_id,
-                            GradebookEntry.student_account_id == None
-                        ).first()
-                        fac_id = assigned.faculty_account_id if assigned else fallback_faculty_id
-                        
+                    all_subs    = historic_subs + matched_subs
+                    all_sub_ids = [s.subject_id for s in all_subs]
+
+                    # Single batch query — replaces one DB round-trip per subject
+                    template_map: dict[int, int] = {
+                        row[0]: row[1]
+                        for row in database_session.query(
+                            GradebookEntry.curriculum_subject_id,
+                            GradebookEntry.faculty_account_id,
+                        )
+                        .filter(
+                            GradebookEntry.curriculum_subject_id.in_(all_sub_ids),
+                            GradebookEntry.student_account_id == None,
+                        )
+                        .all()
+                    }
+
+                    historic_set = set(s.subject_id for s in historic_subs)
+                    for subj in all_subs:
+                        is_historic = subj.subject_id in historic_set
+                        grade_val   = 2.0  if is_historic else None
+                        status_str  = "PASSED" if is_historic else "NOT STARTED"
+                        fac_id      = template_map.get(subj.subject_id, fallback_faculty_id)
+
                         database_session.add(GradebookEntry(
-                            student_account_id=saved_account.account_id,
-                            faculty_account_id=fac_id,
-                            curriculum_subject_id=subj.subject_id,
-                            midterm_grade=grade_val,
-                            system_grade=grade_val,
-                            final_grade=grade_val,
-                            completion_status=status_str
+                            student_account_id    = saved_account.account_id,
+                            faculty_account_id    = fac_id,
+                            curriculum_subject_id = subj.subject_id,
+                            midterm_grade         = grade_val,
+                            system_grade          = grade_val,
+                            final_grade           = grade_val,
+                            completion_status     = status_str,
                         ))
 
         elif saved_account.account_role == "FACULTY":
@@ -327,6 +341,220 @@ def process_user_registration(
             detail=f"Registration failed: {str(e)}"
         )
 
+def process_token_refresh(
+    database_session: Session,
+    refresh_token: str,
+) -> tuple[schemas.SuccessfulLoginResponse, str]:
+    """Validates the incoming refresh token, returns (new_access_response, new_refresh_token)."""
+    payload = decode_refresh_token(refresh_token)
+
+    user_account = repository.fetch_user_by_email(
+        database_session=database_session,
+        target_email=payload.get("sub"),
+    )
+    if user_account is None or not user_account.is_active_account:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Account not found or deactivated.",
+        )
+
+    token_data = {
+        "sub":  user_account.email_address,
+        "role": user_account.account_role,
+        "id":   user_account.account_id,
+    }
+    return (
+        schemas.SuccessfulLoginResponse(
+            access_token=create_secure_access_token(data=token_data),
+            account_role=user_account.account_role,
+            account_id=user_account.account_id,
+        ),
+        create_refresh_token(data=token_data),
+    )
+
+
+def provision_secretary_account(
+    database_session: Session,
+    provision_data: schemas.SecretaryProvisionRequest,
+    admin_id: int,
+    admin_email: str,
+    ip_address: Optional[str] = None,
+) -> schemas.SecretaryProvisionResponse:
+
+    existing = repository.fetch_user_by_email(
+        database_session=database_session,
+        email_address=provision_data.email_address,
+    )
+    if existing:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"An account for '{provision_data.email_address}' already exists.",
+        )
+
+    hashed_password = hash_new_password(provision_data.plain_text_password)
+    new_account = models.UserAccount(
+        email_address=provision_data.email_address,
+        hashed_password=hashed_password,
+        account_role="SECRETARY",
+        is_active_account=True,
+    )
+
+    try:
+        database_session.add(new_account)
+        database_session.flush()
+
+        audit_service.log_event(
+            database_session=database_session,
+            event_type="SECRETARY_PROVISIONED",
+            actor_id=admin_id,
+            actor_email=admin_email,
+            target_type="user",
+            target_id=new_account.account_id,
+            ip_address=ip_address,
+            payload={
+                "provisioned_email": provision_data.email_address,
+                "first_name": provision_data.first_name,
+                "last_name": provision_data.last_name,
+            },
+        )
+
+        database_session.commit()
+        database_session.refresh(new_account)
+
+        return schemas.SecretaryProvisionResponse(
+            account_id=new_account.account_id,
+            email_address=new_account.email_address,
+            account_role=new_account.account_role,
+            is_active_account=new_account.is_active_account,
+            message=f"Secretary account for '{provision_data.email_address}' has been created successfully.",
+        )
+    except Exception as e:
+        database_session.rollback()
+        if isinstance(e, HTTPException):
+            raise e
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to provision secretary account: {str(e)}",
+        )
+
+
+def _resolve_display_name(sp, fp) -> str:
+    if sp:
+        return f"{sp.first_name} {sp.last_name}".strip() or "Unknown User"
+    if fp:
+        return f"{fp.first_name} {fp.last_name}".strip() or "Unknown User"
+    return "Unknown User"
+
+
+def _map_violation_log(user) -> list[schemas.ViolationEntry]:
+    return [
+        schemas.ViolationEntry(
+            offense=e.get("offense", "Policy violation"),
+            detected_at=e.get("detected_at", ""),
+            keywords=e.get("keywords"),
+        )
+        for e in (user.violation_log or [])
+    ]
+
+
+def get_wall_of_shame(database_session: Session) -> list[schemas.ViolatorPublicProfile]:
+    from datetime import datetime, timedelta, timezone
+    from src.modules.settings.models import SystemSettings
+
+    sys_settings = database_session.query(SystemSettings).filter_by(settings_id=1).first()
+    cooldown_days = sys_settings.wall_of_shame_cooldown_days if sys_settings else 60
+
+    rows = repository.fetch_wall_of_shame_rows(database_session)
+    result = []
+    for user, sp, fp in rows:
+        days_until_eligible = 0
+        eligible_for_removal = True
+        if user.last_violation_at:
+            eligible_date = user.last_violation_at + timedelta(days=cooldown_days)
+            remaining = (eligible_date - datetime.now(timezone.utc)).days
+            days_until_eligible = max(0, remaining)
+            eligible_for_removal = remaining <= 0
+
+        result.append(schemas.ViolatorPublicProfile(
+            account_id=        user.account_id,
+            display_name=      _resolve_display_name(sp, fp),
+            role=              user.account_role,
+            violation_count=   user.violation_count,
+            last_violation_at= user.last_violation_at.isoformat() if user.last_violation_at else None,
+            violation_log=     _map_violation_log(user),
+            days_until_eligible=days_until_eligible,
+            eligible_for_removal=eligible_for_removal,
+        ))
+    return result
+
+
+def reform_violator(
+    database_session: Session,
+    account_id: int,
+    admin_id: int,
+    admin_email: str,
+    ip_address: Optional[str] = None,
+) -> dict:
+    from datetime import datetime, timedelta, timezone
+    from src.modules.settings.models import SystemSettings
+
+    target_user = repository.fetch_user_by_id(database_session, account_id)
+    if target_user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found.")
+
+    if target_user.violation_count < 3:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="This user is not on the Wall of Shame.",
+        )
+
+    sys_settings = database_session.query(SystemSettings).filter_by(settings_id=1).first()
+    cooldown_days = sys_settings.wall_of_shame_cooldown_days if sys_settings else 60
+
+    if target_user.last_violation_at:
+        eligible_date = target_user.last_violation_at + timedelta(days=cooldown_days)
+        now = datetime.now(timezone.utc)
+        if now < eligible_date:
+            remaining = (eligible_date - now).days
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Cooldown period not yet expired. {remaining} days remaining before this user can be reformed.",
+            )
+
+    target_user.is_active_account = True
+    target_user.violation_count = 0
+    target_user.removed_from_wall_at = datetime.now(timezone.utc)
+    database_session.commit()
+
+    audit_service.log_event(
+        database_session=database_session,
+        event_type=  "WALL_OF_SHAME_REFORM",
+        actor_id=    admin_id,
+        actor_email= admin_email,
+        target_type= "user",
+        target_id=   account_id,
+        ip_address=  ip_address,
+        payload={"reformed_user_id": account_id},
+    )
+
+    return {"message": f"User {account_id} has been reformed and removed from the Wall of Shame. Account reactivated."}
+
+
+def get_underwatch_users(database_session: Session) -> list[schemas.UnderwatchProfile]:
+    rows = repository.fetch_underwatch_rows(database_session)
+    return [
+        schemas.UnderwatchProfile(
+            account_id=        user.account_id,
+            display_name=      _resolve_display_name(sp, fp),
+            role=              user.account_role,
+            violation_count=   user.violation_count,
+            last_violation_at= user.last_violation_at.isoformat() if user.last_violation_at else None,
+            violation_log=     _map_violation_log(user),
+        )
+        for user, sp, fp in rows
+    ]
+
+
 def validate_pre_registration(
     database_session: Session,
     data: schemas.PreRegistrationValidationRequest,
@@ -336,11 +564,22 @@ def validate_pre_registration(
     except HTTPException:
         raise HTTPException(status_code=500, detail="System settings not initialized.")
 
-    if data.passkey_code != active_passkey:
-        raise HTTPException(status_code=403, detail="Invalid system passkey.")
+    # Both failures return the same code and message so an attacker cannot determine
+    # whether the passkey was valid by observing which error fires first.
+    _invalid = HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="Invalid passkey or student number. Please verify your credentials.",
+    )
 
-    existing_profile = database_session.query(StudentProfile).filter(StudentProfile.student_number == data.student_number).first()
+    if data.passkey_code != active_passkey:
+        raise _invalid
+
+    existing_profile = (
+        database_session.query(StudentProfile)
+        .filter(StudentProfile.student_number == data.student_number)
+        .first()
+    )
     if existing_profile:
-        raise HTTPException(status_code=400, detail="This student number is already registered.")
+        raise _invalid
 
     return True

@@ -2,6 +2,10 @@ venv/
 __pycache__/
 *.pyc
 .env
+.env.*
+!.env.example
 local.db
 *.db
 temp_uploads/
+review_queue/
+OLLAMA_MIGRATION.md

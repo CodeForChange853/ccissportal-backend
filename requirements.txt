@@ -15,6 +15,7 @@ python-dotenv
 passlib[bcrypt]
 bcrypt==4.0.1
 python-jose[cryptography]
+slowapi
 
 # File uploads & Image Processing
 python-multipart
@@ -25,3 +26,6 @@ scikit-learn
 tenacity
 google-api-core
 google-genai
+
+# SE-01: Scheduled forecast retraining
+apscheduler

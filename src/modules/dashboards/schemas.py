@@ -1,6 +1,7 @@
 # backend-v2/src/modules/dashboards/schemas.py
-from pydantic import BaseModel
-from typing import List, Optional, Any
+from pydantic import BaseModel, ConfigDict
+from typing import List, Any
+from src.modules.enrollment.schemas import GradeRecord, SubjectAvailabilityResult  # noqa: F401 — re-exported
 
 class AdminStatsResponse(BaseModel):
     total_students: int
@@ -17,19 +18,22 @@ class StudentProfileResponse(BaseModel):
 
     # Fields the dashboard reads from profile.X
     name:           str
-    student_id:     Optional[str] = None
-    course:         Optional[str] = None
+    student_id:     str | None = None
+    course:         str | None = None
     year_level:     int = 1
     semester:       int = 1
     clearance:      dict = {"status": "PENDING", "details": "Enrollment request awaiting admin review"}
+    was_reformed:   bool = False  # True if user was previously on the Wall of Shame and reformed
 
 
 class OmniSearchResult(BaseModel):
     """Single item returned by GET /admin/search?q="""
-    result_type: str
-    result_id: int
+    result_type: str                      # STUDENT | FACULTY | SUBJECT | ACTION
+    result_id: int                        # entity PK, or 0 for system-level actions
     primary_text: str
-    secondary_text: Optional[str] = None
+    secondary_text: str | None = None
+    relevance_score: float = 1.0
+    action_type: str | None = None    # SUSPEND_USER | ACTIVATE_USER | MAINTENANCE_ON | MAINTENANCE_OFF
 
 
 class UserSearchResult(BaseModel):
@@ -39,8 +43,7 @@ class UserSearchResult(BaseModel):
     account_role: str
     is_active_account: bool
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class UpdateUserStatusRequest(BaseModel):
@@ -56,32 +59,6 @@ class DirectAdmissionRequest(BaseModel):
     year_level: int = 1
     email: str
     password: str
-
-
-# PHASE 4 — ACADEMIC STANDING (three-tab student dashboard)
-class GradeRecord(BaseModel):
-    """One row in a student's grade history."""
-    subject_code:      str
-    subject_title:     str
-    credit_units:      int
-    target_year_level: int
-    target_semester:   int
-    midterm_grade:     Optional[float] = None
-    final_grade:       Optional[float] = None
-    completion_status: str
-
-
-class SubjectAvailabilityResult(BaseModel):
-    """Per-subject result from PrerequisiteChecker."""
-    subject_id:      int
-    subject_code:    str
-    subject_title:   str
-    credit_units:    int
-    status:          str
-    prereq_code:     Optional[str] = None
-    prereq_title:    Optional[str] = None
-    prereq_status:   Optional[str] = None
-    blocking_reason: Optional[str] = None
 
 
 class NextSemesterRecommendation(BaseModel):
@@ -104,7 +81,7 @@ class BackSubjectRecord(BaseModel):
     credit_units:    int
     subject_type:    str              # MAJOR | MINOR | SPECIAL
     times_failed:    int
-    blocking_reason: Optional[str] = None
+    blocking_reason: str | None = None
 
 
 class RetentionStatus(BaseModel):
@@ -125,7 +102,7 @@ class AcademicStandingResponse(BaseModel):
     passed_subjects:              List[GradeRecord]
     next_semester_recommendation: NextSemesterRecommendation
     back_subjects:                List[BackSubjectRecord]    = []
-    retention_status:             Optional[RetentionStatus] = None
+    retention_status:             RetentionStatus | None = None
 
 
 
@@ -134,21 +111,20 @@ class EnrollmentQueueItem(BaseModel):
 
     request_id:          int
     student_account_id:  int
-    student_name:        Optional[str]  = None
-    student_number:      Optional[str]  = None
+    student_name:        str | None  = None
+    student_number:      str | None  = None
     target_year_level:   int
     target_semester:     int
     review_status:       str
-    admin_review_notes:  Optional[str]  = None
+    admin_review_notes:  str | None  = None
     date_submitted:      Any            = None
 
     # COR scan link
-    document_verification_token: Optional[str] = None
+    document_verification_token: str | None = None
 
     # PHASE 4: AI enrichment
-    extracted_subjects:  Optional[List[str]] = None
-    verification_result: Optional[Any]       = None
-    ai_recommendation:   Optional[Any]       = None
+    extracted_subjects:  List[str] | None = None
+    verification_result: Any | None       = None
+    ai_recommendation:   Any | None       = None
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)

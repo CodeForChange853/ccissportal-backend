@@ -2,25 +2,17 @@
 
 from sqlalchemy.orm import Session
 from .models import UserAccount
-from sqlalchemy.orm import Session
 from . import models
+from src.modules.enrollment.models import StudentProfile
+from src.modules.faculty.models import FacultyProfile
+
 
 def fetch_user_by_email(database_session: Session, target_email: str) -> UserAccount | None:
-    """
-    Searches the database for a user matching the provided email address.
-    Because we added index=True to the email column in models.py, 
-    this search is O(log n) and extremely fast.
-    """
-    return database_session.query(UserAccount).filter(UserAccount.email_address == target_email).first()
-
-def get_user_account_by_email(database_session: Session, email_address: str):
-    """
-    Checks the database to see if an account with this email already exists.
-    Returns the UserAccount object if found, or None if it is available.
-    """
-    return database_session.query(models.UserAccount).filter(
-        models.UserAccount.email_address == email_address
-    ).first()
+    return (
+        database_session.query(UserAccount)
+        .filter(UserAccount.email_address == target_email)
+        .first()
+    )
 
 def save_new_user_account(database_session: Session, new_account: UserAccount) -> UserAccount:
     """
@@ -33,8 +25,43 @@ def save_new_user_account(database_session: Session, new_account: UserAccount) -
     return new_account
 
 def lock_user_account(database_session: Session, target_email: str) -> None:
-
     user_account = fetch_user_by_email(database_session, target_email)
     if user_account:
         user_account.is_active_account = False
         database_session.commit()
+
+
+def fetch_user_by_id(database_session: Session, account_id: int) -> UserAccount | None:
+    return database_session.query(UserAccount).filter(UserAccount.account_id == account_id).first()
+
+
+def fetch_wall_of_shame_rows(
+    database_session: Session,
+) -> list[tuple[UserAccount, StudentProfile, FacultyProfile]]:
+    return (
+        database_session.query(UserAccount, StudentProfile, FacultyProfile)
+        .outerjoin(StudentProfile, StudentProfile.student_account_id == UserAccount.account_id)
+        .outerjoin(FacultyProfile, FacultyProfile.faculty_account_id == UserAccount.account_id)
+        .filter(
+            UserAccount.violation_count >= 3,
+            UserAccount.is_active_account == False,
+            UserAccount.removed_from_wall_at == None,
+        )
+        .all()
+    )
+
+
+def fetch_underwatch_rows(
+    database_session: Session,
+) -> list[tuple[UserAccount, StudentProfile, FacultyProfile]]:
+    return (
+        database_session.query(UserAccount, StudentProfile, FacultyProfile)
+        .outerjoin(StudentProfile, StudentProfile.student_account_id == UserAccount.account_id)
+        .outerjoin(FacultyProfile, FacultyProfile.faculty_account_id == UserAccount.account_id)
+        .filter(
+            UserAccount.violation_count >= 1,
+            UserAccount.violation_count < 3,
+            UserAccount.is_active_account == True,
+        )
+        .all()
+    )

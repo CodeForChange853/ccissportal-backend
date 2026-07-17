@@ -102,6 +102,8 @@ def log_event(
             payload["threat_mitigation_engaged"] = False
             payload["action_taken"] = "ADMIN_EXEMPT_FROM_TRIPWIRE"
 
+    narrative_status = 'PENDING' if heuristic_score >= 35.0 else 'NONE'
+
     return repository.create_event(
         database_session=database_session,
         event_type=event_type,
@@ -112,6 +114,7 @@ def log_event(
         ip_address=ip_address,
         payload=payload,
         anomaly_score=heuristic_score,
+        narrative_status=narrative_status,
     )
 
 
@@ -143,3 +146,32 @@ def get_summary(database_session: Session) -> schemas.AuditSummaryOut:
         anomaly_score=score,
         top_anomalies=high[:5],
     )
+
+
+# SE-08 — Batch narrative generation
+def process_pending_narratives(database_session: Session, limit: int = 5) -> dict:
+    from . import gemini_narrator
+
+    pending = repository.fetch_pending_narrative_events(database_session, limit=limit)
+    generated = 0
+    failed = 0
+
+    for event in pending:
+        repository.set_narrative_status(database_session, event, 'GENERATING')
+        try:
+            narrative = gemini_narrator.generate_narrative(event)
+            repository.save_narrative(database_session, event, narrative)
+            generated += 1
+        except Exception as exc:
+            repository.set_narrative_status(database_session, event, 'FAILED')
+            print(f"[SE-08] Narrative generation failed for event #{event.event_id}: {exc}")
+            failed += 1
+
+    return {"generated": generated, "failed": failed, "skipped": len(pending) - generated - failed}
+
+
+def acknowledge_narrative(database_session: Session, event_id: int) -> models.AuditEvent:
+    event = repository.fetch_event_by_id(database_session, event_id)
+    if event is None:
+        return None
+    return repository.acknowledge_narrative(database_session, event)

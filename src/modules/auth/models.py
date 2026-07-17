@@ -1,6 +1,6 @@
 # backend-v2/src/modules/auth/models.py
 
-from sqlalchemy import Column, Integer, String, Boolean, DateTime
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, JSON
 from sqlalchemy.sql import func
 from src.core.database_setup import Base
 
@@ -17,3 +17,8 @@ class UserAccount(Base):
     is_active_account = Column(Boolean, default=True)
     violation_count = Column(Integer, default=0) # Track harassment/explicit content strikes
     account_created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # Wall of Shame fields
+    last_violation_at = Column(DateTime(timezone=True), nullable=True)
+    violation_log = Column(JSON, nullable=True)  # [{offense, detected_at, keywords}]
+    removed_from_wall_at = Column(DateTime(timezone=True), nullable=True)  # Set by admin on reform

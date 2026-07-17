@@ -16,12 +16,26 @@ def process_student_enrollment_submission(
     ip_address: Optional[str] = None,
 ) -> models.StudentEnrollmentRequest:
 
-    # ── Step 1: Enrollment gate 
+    # ── Step 1: Enrollment gate
     if not get_enrollment_status(database_session=database_session):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Enrollment is currently closed. "
                    "Please check the university announcements for the next enrollment period.",
+        )
+
+    # ── F-13.5: Equipment clearance gate ─────────────────────────────────────
+    _eq_profile = database_session.query(models.StudentProfile).filter(
+        models.StudentProfile.student_account_id == student_id
+    ).first()
+    if _eq_profile and _eq_profile.equipment_clearance_status == "UNCLEARED":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=(
+                "Enrollment blocked: You have unreturned departmental equipment on record. "
+                "Return all borrowed items to the Secretariat office to restore your "
+                "enrollment eligibility."
+            ),
         )
 
     # ── Step 2: Year/semester validation for unscanned submissions 
@@ -80,7 +94,26 @@ def process_student_enrollment_submission(
     if extracted_subjects and not verification_result:
         try:
             from src.modules.enrollment.prerequisite_checker import PrerequisiteChecker
-            checker = PrerequisiteChecker(database_session)
+            from src.modules.settings.models import SystemSettings
+
+            _sys = database_session.query(SystemSettings).filter(
+                SystemSettings.settings_id == 1
+            ).first()
+            _ojt_code = _sys.ojt_subject_code if _sys else None
+
+            _ojt_clearance = "NOT_REQUIRED"
+            if _ojt_code:
+                _profile = database_session.query(models.StudentProfile).filter(
+                    models.StudentProfile.student_account_id == student_id
+                ).first()
+                if _profile:
+                    _ojt_clearance = _profile.ojt_clearance_status
+
+            checker = PrerequisiteChecker(
+                database_session,
+                ojt_subject_code=_ojt_code,
+                student_ojt_clearance=_ojt_clearance,
+            )
             rec     = checker.check_subjects(
                 student_account_id=student_id,
                 subject_codes=extracted_subjects,
@@ -156,19 +189,20 @@ def _materialize_enrollment(
     enrollment_request: models.StudentEnrollmentRequest,
 ) -> int:
     """
-    When an enrollment request is APPROVED, create GradebookEntry rows
-    with completion_status='ENROLLED' for each subject, linking the student
-    to the faculty member already assigned to teach that subject.
+    When an enrollment request is APPROVED, create GradebookEntry rows with
+    completion_status='ENROLLED' for each subject, linking the student to the
+    faculty member already assigned to teach that subject.
 
+    Does NOT commit — the caller is responsible for the transaction boundary.
     Returns the number of subjects materialized.
     """
     from src.modules.faculty.models import GradebookEntry, FacultyProfile
     from src.modules.enrollment.models import CurriculumSubject, StudentProfile
 
-    student_id   = enrollment_request.student_account_id
-    year_level   = enrollment_request.target_year_level
-    semester     = enrollment_request.target_semester
-    subject_codes = enrollment_request.extracted_subjects  # list[str] or None
+    student_id    = enrollment_request.student_account_id
+    year_level    = enrollment_request.target_year_level
+    semester      = enrollment_request.target_semester
+    subject_codes = enrollment_request.extracted_subjects  # list[str] | None
 
     # ── Step 1: Resolve subjects to enroll ──
     if subject_codes:
@@ -178,7 +212,6 @@ def _materialize_enrollment(
             .all()
         )
     else:
-        # Fallback: enroll in all subjects for the target year/semester
         subjects = (
             database_session.query(CurriculumSubject)
             .filter(
@@ -191,7 +224,7 @@ def _materialize_enrollment(
     if not subjects:
         return 0
 
-    # ── Step 2: Find a fallback faculty member ──
+    # ── Step 2: Fallback faculty ──
     first_faculty = database_session.query(FacultyProfile).first()
     fallback_faculty_id = first_faculty.faculty_account_id if first_faculty else None
 
@@ -199,46 +232,49 @@ def _materialize_enrollment(
         print("⚠️  No faculty profiles exist — cannot materialize enrollment.")
         return 0
 
-    # ── Step 3: Deduplicate — skip subjects student already has a gradebook entry for ──
-    existing_subject_ids = {
+    subject_ids = [s.subject_id for s in subjects]
+
+    # ── Step 3: Deduplicate — skip subjects already in the gradebook ──
+    existing_ids = {
         row[0] for row in
         database_session.query(GradebookEntry.curriculum_subject_id)
         .filter(
             GradebookEntry.student_account_id == student_id,
-            GradebookEntry.curriculum_subject_id.in_([s.subject_id for s in subjects]),
+            GradebookEntry.curriculum_subject_id.in_(subject_ids),
+        )
+        .all()
+    }
+
+    # ── Step 4: Batch-fetch all faculty template rows in ONE query ──
+    # (replaces the N individual per-subject lookups that were inside the loop)
+    template_map: dict[int, int] = {
+        row[0]: row[1]
+        for row in
+        database_session.query(
+            GradebookEntry.curriculum_subject_id,
+            GradebookEntry.faculty_account_id,
+        )
+        .filter(
+            GradebookEntry.curriculum_subject_id.in_(subject_ids),
+            GradebookEntry.student_account_id == None,
         )
         .all()
     }
 
     materialized = 0
     for subj in subjects:
-        if subj.subject_id in existing_subject_ids:
+        if subj.subject_id in existing_ids:
             continue
 
-        # Find the faculty assigned to teach this subject (template row with student_account_id=NULL)
-        assigned_template = (
-            database_session.query(GradebookEntry)
-            .filter(
-                GradebookEntry.curriculum_subject_id == subj.subject_id,
-                GradebookEntry.student_account_id == None,
-            )
-            .first()
-        )
-        fac_id = assigned_template.faculty_account_id if assigned_template else fallback_faculty_id
-
-        new_entry = GradebookEntry(
-            student_account_id=student_id,
-            faculty_account_id=fac_id,
-            curriculum_subject_id=subj.subject_id,
-            midterm_grade=None,
-            system_grade=None,
-            final_grade=None,
-            completion_status="ENROLLED",
-        )
-        database_session.add(new_entry)
+        database_session.add(GradebookEntry(
+            student_account_id    = student_id,
+            faculty_account_id    = template_map.get(subj.subject_id, fallback_faculty_id),
+            curriculum_subject_id = subj.subject_id,
+            completion_status     = "ENROLLED",
+        ))
         materialized += 1
 
-    # ── Step 4: Update the student's profile to reflect the new year/semester ──
+    # ── Step 5: Update student's standing ──
     profile = (
         database_session.query(StudentProfile)
         .filter(StudentProfile.student_account_id == student_id)
@@ -248,9 +284,8 @@ def _materialize_enrollment(
         profile.current_year_level = year_level
         profile.current_semester   = semester
 
-    if materialized > 0:
-        database_session.commit()
-
+    # flush to surface constraint violations before the caller commits
+    database_session.flush()
     return materialized
 
 
@@ -294,13 +329,15 @@ def process_admin_enrollment_decision(
         admin_notes=decision_data.admin_notes,
     )
 
-    # ── NEW: Materialize enrollment into gradebook when APPROVED ──
+    # ── Materialize enrollment into gradebook when APPROVED ──
     subjects_enrolled = 0
     if decision_data.decision_status == "APPROVED":
         subjects_enrolled = _materialize_enrollment(
             database_session=database_session,
             enrollment_request=updated_request,
         )
+        # _materialize_enrollment only flushes — we own the commit for this transaction
+        database_session.commit()
 
     event_type = (
         "ENROLLMENT_APPROVED"
@@ -322,7 +359,43 @@ def process_admin_enrollment_decision(
         },
     )
 
+    # ── P4-B: Emit enrollment notification to student (non-blocking) ──
+    from src.modules.notifications import service as notif_service
+    notif_service.emit_enrollment_notification(
+        database_session, updated_request.student_account_id, decision_data.decision_status
+    )
+
     return updated_request
+
+# ── SE-03: Circular dependency detection ──────────────────────────────────────
+
+def _detect_circular_dependency(
+    database_session: Session,
+    subject_id: int,
+    proposed_prereq_id: int,
+) -> bool:
+    """
+    Returns True if making proposed_prereq_id the prerequisite of subject_id
+    would create a cycle (A→B→...→A).
+    Walks the existing prerequisite chain from proposed_prereq_id upward.
+    If it reaches subject_id, a cycle would form.
+    """
+    all_subjects = {
+        s.subject_id: s
+        for s in database_session.query(models.CurriculumSubject).all()
+    }
+    visited: set[int] = set()
+    current = proposed_prereq_id
+    while current is not None:
+        if current == subject_id:
+            return True
+        if current in visited:
+            break
+        visited.add(current)
+        subj = all_subjects.get(current)
+        current = subj.prerequisite_subject_id if subj else None
+    return False
+
 
 def add_new_subject_to_curriculum(
     database_session: Session,
@@ -338,6 +411,18 @@ def add_new_subject_to_curriculum(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Subject code '{subject_data.subject_code}' already exists in the curriculum.",
         )
+
+    # SE-03: Circular dependency guard
+    if subject_data.prerequisite_subject_id is not None:
+        prereq_subj = repository.fetch_subject_by_id(database_session, subject_data.prerequisite_subject_id)
+        if prereq_subj is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Prerequisite subject ID {subject_data.prerequisite_subject_id} not found.",
+            )
+        # For a new subject, use -1 as a placeholder (it doesn't exist yet so no cycle risk from it)
+        # but we still check if the proposed prereq's own chain would eventually loop
+        # (can't loop on a brand-new subject, so this is safe to skip for ADD — only needed for UPDATE)
 
     new_subject = models.CurriculumSubject(
         subject_code=            subject_data.subject_code,
@@ -453,7 +538,24 @@ def update_curriculum_subject(
                 detail=f"Subject code '{update_data.subject_code}' already exists.",
             )
 
+    # SE-03: Circular dependency guard on update
     update_dict = update_data.model_dump(exclude_unset=True)
+    if "prerequisite_subject_id" in update_dict and update_dict["prerequisite_subject_id"] is not None:
+        proposed_prereq = update_dict["prerequisite_subject_id"]
+        if proposed_prereq == target_subject_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A subject cannot be its own prerequisite.",
+            )
+        if _detect_circular_dependency(database_session, target_subject_id, proposed_prereq):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"Circular dependency detected: setting this prerequisite would create "
+                    f"a cycle in the prerequisite chain. Choose a different prerequisite."
+                ),
+            )
+
     for key, value in update_dict.items():
         setattr(subject, key, value)
 

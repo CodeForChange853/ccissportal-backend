@@ -1,15 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, Request, status, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import or_, case, func
 from src.core.security import require_admin, get_current_user
-from . import schemas
+from . import schemas, service, repository, search_service
 from src.core.database_setup import get_database_session
 from src.modules.auth.models import UserAccount
-from src.modules.enrollment.models import StudentEnrollmentRequest, StudentProfile
 from src.modules.audit import service as audit_service
+from src.modules.auth import service as auth_service, schemas as auth_schemas
 
 dashboards_router = APIRouter(tags=["Portal Dashboards"])
-
 
 
 # ADMIN DASHBOARD
@@ -24,285 +22,45 @@ def get_admin_dashboard_statistics(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Access Denied: Only administrators can view these statistics.",
         )
-
-    
-    student_count, faculty_count = (
-        database_session.query(
-            func.sum(case((UserAccount.account_role == "STUDENT", 1), else_=0)),
-            func.sum(case((UserAccount.account_role == "FACULTY", 1), else_=0)),
-        ).one()
-    )
-
-    pending_requests = database_session.query(StudentEnrollmentRequest).filter(
-        StudentEnrollmentRequest.review_status == "PENDING"
-    ).count()
-
-    return schemas.AdminStatsResponse(
-        total_students=int(student_count or 0),
-        total_faculty=int(faculty_count or 0),
-        pending_enrollment_requests=pending_requests,
-    )
-
+    return service.get_admin_stats(database_session)
 
 
 # STUDENT DASHBOARD
+
 @dashboards_router.get("/student/profile", response_model=schemas.StudentProfileResponse)
 def get_student_dashboard_profile(
     database_session: Session = Depends(get_database_session),
     current_user: UserAccount = Depends(get_current_user),
 ):
+    return service.get_student_profile_data(database_session, current_user)
 
-    profile = database_session.query(StudentProfile).filter(
-        StudentProfile.student_account_id == current_user.account_id
-    ).first()
 
-    full_name   = "Student"
-    student_num = None
-    course      = None
-    year_level  = 1
-    semester    = 1
-
-    if profile:
-        full_name   = f"{profile.first_name} {profile.last_name}".strip() or "Student"
-        student_num = profile.student_number
-        course      = profile.current_course
-        year_level  = profile.current_year_level or 1
-        semester    = profile.current_semester   or 1
-
-    from src.modules.enrollment.models import StudentEnrollmentRequest
-    has_pending = database_session.query(StudentEnrollmentRequest).filter(
-        StudentEnrollmentRequest.student_account_id == current_user.account_id,
-        StudentEnrollmentRequest.review_status      == "PENDING",
-    ).first() is not None
-
-    clearance = (
-        {"status": "PENDING",  "details": "Enrollment request awaiting admin review"}
-        if has_pending else
-        {"status": "CLEARED",  "details": "Ready for next enrollment"}
-    )
-
-    account_status = "Active" if current_user.is_active_account else "Locked"
-
-    return schemas.StudentProfileResponse(
-        account_id=    current_user.account_id,
-        email_address= current_user.email_address,
-        account_role=  current_user.account_role,
-        account_status=account_status,
-        name=          full_name,
-        student_id=    student_num,
-        course=        course,
-        year_level=    year_level,
-        semester=      semester,
-        clearance=     clearance,
-    )
-
-@dashboards_router.get(
-    "/student/academic-standing",
-    response_model=schemas.AcademicStandingResponse,
-)
+@dashboards_router.get("/student/academic-standing", response_model=schemas.AcademicStandingResponse)
 def get_student_academic_standing(
     database_session: Session = Depends(get_database_session),
     current_user: UserAccount = Depends(get_current_user),
 ):
-   
     if current_user.account_role != "STUDENT":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This endpoint is for students only.",
         )
-
-    # Load student profile for year/semester standing
-    profile = database_session.query(StudentProfile).filter(
-        StudentProfile.student_account_id == current_user.account_id
-    ).first()
-
-    if profile is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Student profile not found. Contact the registrar.",
-        )
-
-    current_year     = profile.current_year_level or 1
-    current_semester = profile.current_semester   or 1
-    student_name     = f"{profile.first_name} {profile.last_name}".strip()
-
-    # Run the checker
-    from src.modules.enrollment.prerequisite_checker import PrerequisiteChecker
-    checker  = PrerequisiteChecker(database_session)
-    standing = checker.get_academic_standing(
-        student_account_id=current_user.account_id,
-        current_year=current_year,
-        current_semester=current_semester,
-    )
-
-    # Convert raw dict grade records to GradeRecord schema
-    def to_grade_records(records: list) -> list[schemas.GradeRecord]:
-        return [schemas.GradeRecord(**r) for r in records]
-
-    
-    def _safe_get(obj, key, default=None):
-        if isinstance(obj, dict):
-            return obj.get(key, default)
-        return getattr(obj, key, default)
-
-    rec = standing["next_semester_recommendation"]
-
-    raw_subject_results = _safe_get(rec, "subject_results", [])
-
-    next_rec = schemas.NextSemesterRecommendation(
-        verdict=_safe_get(rec, "verdict", "UNKNOWN"),
-        pass_rate=_safe_get(rec, "pass_rate", 0.0),
-        available_count=_safe_get(rec, "available_count", 0),
-        blocked_count=_safe_get(rec, "blocked_count", 0),
-        pending_count=_safe_get(rec, "pending_count", 0),
-        flagged_subjects=_safe_get(rec, "flagged_subjects", []),
-        suggested_action=_safe_get(rec, "suggested_action", ""),
-        subject_results=[
-            schemas.SubjectAvailabilityResult(
-                subject_id=_safe_get(r, "subject_id", -1),
-                subject_code=_safe_get(r, "subject_code", ""),
-                subject_title=_safe_get(r, "subject_title", ""),
-                credit_units=_safe_get(r, "credit_units", 0),
-                status=_safe_get(r, "status", "UNKNOWN"),
-                prereq_code=_safe_get(r, "prereq_code"),
-                prereq_title=_safe_get(r, "prereq_title"),
-                prereq_status=_safe_get(r, "prereq_status"),
-                blocking_reason=_safe_get(r, "blocking_reason"),
-            )
-            for r in raw_subject_results
-        ],
-    )
-
-    # Convert back subjects to schema
-    def to_back_subject_records(records: list) -> list[schemas.BackSubjectRecord]:
-        result = []
-        for r in records:
-            def _g(key, default=None):
-                return r.get(key, default) if isinstance(r, dict) else getattr(r, key, default)
-            result.append(schemas.BackSubjectRecord(
-                subject_id=      _g("subject_id", -1),
-                subject_code=    _g("subject_code", ""),
-                subject_title=   _g("subject_title", ""),
-                credit_units=    _g("credit_units", 0),
-                subject_type=    _g("subject_type", "MINOR"),
-                times_failed=    _g("times_failed", 1),
-                blocking_reason= _g("blocking_reason"),
-            ))
-        return result
-
-    # Convert retention status to schema
-    raw_retention = standing.get("retention_status")
-    retention_schema = None
-    if raw_retention is not None:
-        def _gr(key, default=None):
-            return raw_retention.get(key, default) if isinstance(raw_retention, dict) else getattr(raw_retention, key, default)
-        retention_schema = schemas.RetentionStatus(
-            status=              _gr("status", "GOOD"),
-            message=             _gr("message", ""),
-            at_risk_major_count= _gr("at_risk_major_count", 0),
-            failed_units=        _gr("failed_units", 0),
-        )
-
-    return schemas.AcademicStandingResponse(
-        student_year_level=current_year,
-        student_semester=current_semester,
-        student_name=student_name,
-        is_irregular=standing.get("is_irregular", False),
-        current_subjects=to_grade_records(standing["current_subjects"]),
-        passed_subjects=to_grade_records(standing["passed_subjects"]),
-        next_semester_recommendation=next_rec,
-        back_subjects=to_back_subject_records(standing.get("back_subjects", [])),
-        retention_status=retention_schema,
-    )
-
+    return service.get_academic_standing(database_session, current_user)
 
 
 # ADMIN — OMNI SEARCH
+
 @dashboards_router.get("/admin/search", response_model=list[schemas.OmniSearchResult])
 def omni_search(
     q: str = Query(min_length=1, max_length=100),
     database_session: Session = Depends(get_database_session),
     _admin: UserAccount = Depends(require_admin),
 ):
-
-    # ── NATURAL LANGUAGE PARSER ──
-    action_verbs = ["manage", "suspend", "activate", "view", "edit", "find", "search", "update"]
-    search_query = q.lower().strip()
-    
-    for verb in action_verbs:
-        if search_query.startswith(f"{verb} "):
-            search_query = search_query[len(verb)+1:].strip()
-            break
-
-    term = f"%{search_query}%"
-    results = []
-
-
-    matched_students = (
-        database_session.query(UserAccount, StudentProfile)
-        .join(StudentProfile, StudentProfile.student_account_id == UserAccount.account_id)
-        .filter(UserAccount.account_role == "STUDENT")
-        .filter(
-            or_(
-                UserAccount.email_address.ilike(term),
-                StudentProfile.first_name.ilike(term),
-                StudentProfile.last_name.ilike(term),
-                StudentProfile.student_number.ilike(term),
-            )
-        )
-        .all()
-    )
-    for user, profile in matched_students:
-        full_name = f"{profile.first_name} {profile.last_name}".strip()
-        results.append(schemas.OmniSearchResult(
-            result_type="STUDENT",
-            result_id=user.account_id,
-            primary_text=full_name or user.email_address,
-            secondary_text=profile.student_number or user.email_address,
-        ))
-
-    # Search faculty by name or employee ID
-    from src.modules.faculty.models import FacultyProfile
-    matched_faculty = (
-        database_session.query(FacultyProfile)
-        .filter(or_(
-            FacultyProfile.first_name.ilike(term),
-            FacultyProfile.last_name.ilike(term),
-            FacultyProfile.employee_id.ilike(term),
-        ))
-        .all()
-    )
-    for fp in matched_faculty:
-        results.append(schemas.OmniSearchResult(
-            result_type="FACULTY",
-            result_id=fp.faculty_account_id,
-            primary_text=f"{fp.first_name} {fp.last_name}",
-            secondary_text=fp.academic_department,
-        ))
-
-    # Search subjects by code or title
-    from src.modules.enrollment.models import CurriculumSubject
-    matched_subjects = (
-        database_session.query(CurriculumSubject)
-        .filter(or_(
-            CurriculumSubject.subject_code.ilike(term),
-            CurriculumSubject.subject_title.ilike(term),
-        ))
-        .all()
-    )
-    for subj in matched_subjects:
-        results.append(schemas.OmniSearchResult(
-            result_type="SUBJECT",
-            result_id=subj.subject_id,
-            primary_text=subj.subject_code,
-            secondary_text=subj.subject_title,
-        ))
-
-    return results[:15]
-
+    return search_service.run_omni_search(database_session, q)
 
 
 # ADMIN — USER MANAGEMENT
+
 @dashboards_router.get("/admin/users", response_model=list[schemas.UserSearchResult])
 def list_all_users(
     role:  str = Query(default="ALL"),
@@ -311,10 +69,7 @@ def list_all_users(
     database_session: Session = Depends(get_database_session),
     _admin: UserAccount = Depends(require_admin),
 ):
-    query = database_session.query(UserAccount)
-    if role != "ALL":
-        query = query.filter(UserAccount.account_role == role)
-    return query.order_by(UserAccount.email_address).offset(skip).limit(limit).all()
+    return repository.list_users(database_session, role, skip, limit)
 
 
 @dashboards_router.get("/admin/users/search", response_model=list[schemas.UserSearchResult])
@@ -323,32 +78,18 @@ def search_user_accounts(
     database_session: Session = Depends(get_database_session),
     _admin: UserAccount = Depends(require_admin),
 ):
-    term = f"%{q}%"
-    return (
-        database_session.query(UserAccount)
-        .filter(UserAccount.email_address.ilike(term))
-        .order_by(UserAccount.email_address)
-        .limit(20)
-        .all()
-    )
+    return repository.search_users_by_email(database_session, q)
 
 
-@dashboards_router.get(
-    "/admin/students/{account_id}/grades",
-)
+@dashboards_router.get("/admin/students/{account_id}/grades")
 def get_student_grades_for_admin(
     account_id: int,
     database_session: Session = Depends(get_database_session),
     _admin: UserAccount = Depends(require_admin),
 ):
-
     from src.modules.faculty import repository as faculty_repo
 
-    student = database_session.query(UserAccount).filter(
-        UserAccount.account_id == account_id,
-        UserAccount.account_role == "STUDENT",
-    ).first()
-
+    student = repository.get_student_by_id(database_session, account_id)
     if student is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -359,7 +100,6 @@ def get_student_grades_for_admin(
         database_session=database_session,
         target_student_id=account_id,
     )
-
     return {
         "student_account_id": account_id,
         "email_address":      student.email_address,
@@ -374,35 +114,30 @@ def create_student_direct(
     database_session: Session = Depends(get_database_session),
     _admin: UserAccount = Depends(require_admin),
 ):
-
-    from src.modules.auth import service as auth_service, schemas as auth_schemas
-
     reg = auth_schemas.RegistrationRequest(
-        email_address=student_data.email,
+        email_address=      student_data.email,
         plain_text_password=student_data.password,
-        account_role="STUDENT",
-        first_name=student_data.full_name.split()[0] if student_data.full_name else "Student",
-        last_name=" ".join(student_data.full_name.split()[1:]) if student_data.full_name else "",
-        student_number=student_data.student_number,
-        course=student_data.course,
-        passkey_code=None,
+        account_role=       "STUDENT",
+        first_name=         student_data.full_name.split()[0] if student_data.full_name else "Student",
+        last_name=          " ".join(student_data.full_name.split()[1:]) if student_data.full_name else "",
+        student_number=     student_data.student_number,
+        course=             student_data.course,
+        passkey_code=       None,
     )
-
     result = auth_service.process_user_registration(
         database_session=database_session,
         registration_data=reg,
         ip_address=request.client.host if request.client else None,
         skip_passkey=True,
     )
-
     audit_service.log_event(
         database_session=database_session,
-        event_type="STUDENT_ADMITTED",
-        actor_id=_admin.account_id,
-        actor_email=_admin.email_address,
-        target_type="student",
-        target_id=result.account_id,
-        ip_address=request.client.host if request.client else None,
+        event_type=  "STUDENT_ADMITTED",
+        actor_id=    _admin.account_id,
+        actor_email= _admin.email_address,
+        target_type= "student",
+        target_id=   result.account_id,
+        ip_address=  request.client.host if request.client else None,
         payload={
             "student_number": student_data.student_number,
             "course":         student_data.course,
@@ -410,7 +145,6 @@ def create_student_direct(
             "email":          student_data.email,
         },
     )
-
     return {
         "message":    f"Student account created for {student_data.email}.",
         "account_id": result.account_id,
@@ -425,122 +159,100 @@ def update_user_active_status(
     database_session: Session = Depends(get_database_session),
     _admin: UserAccount = Depends(require_admin),
 ):
-    target_user = database_session.query(UserAccount).filter(
-        UserAccount.account_id == account_id
-    ).first()
-
+    target_user = repository.set_user_active_status(database_session, account_id, status_data.is_active)
     if target_user is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"No account found with ID {account_id}.",
         )
 
-    target_user.is_active_account = status_data.is_active
-    database_session.commit()
-
     event_type = "USER_ACTIVATED" if status_data.is_active else "USER_SUSPENDED"
     audit_service.log_event(
         database_session=database_session,
-        event_type=event_type,
-        actor_id=_admin.account_id,
-        actor_email=_admin.email_address,
-        target_type="user",
-        target_id=account_id,
-        ip_address=request.client.host if request.client else None,
+        event_type=  event_type,
+        actor_id=    _admin.account_id,
+        actor_email= _admin.email_address,
+        target_type= "user",
+        target_id=   account_id,
+        ip_address=  request.client.host if request.client else None,
         payload={
             "target_email": target_user.email_address,
             "target_role":  target_user.account_role,
             "new_status":   "active" if status_data.is_active else "suspended",
         },
     )
-
     action = "activated" if status_data.is_active else "deactivated"
     return {"message": f"Account {target_user.email_address} {action} successfully."}
 
 
-# ── STUDENT SCHEDULE 
+# STUDENT SCHEDULE
 
 @dashboards_router.get("/student/schedule")
 def get_student_schedule(
     database_session: Session = Depends(get_database_session),
     current_user: UserAccount = Depends(get_current_user),
 ):
-    
     if current_user.account_role != "STUDENT":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This endpoint is for students only.",
         )
+    return service.get_student_schedule(database_session, current_user.account_id)
 
-    from src.modules.faculty.models import GradebookEntry, FacultyProfile
-    from src.modules.enrollment.models import CurriculumSubject
 
-    rows = (
-        database_session.query(GradebookEntry, CurriculumSubject, FacultyProfile)
-        .join(
-            CurriculumSubject,
-            GradebookEntry.curriculum_subject_id == CurriculumSubject.subject_id,
+# SE-04: Student at-risk self-assessment
+
+@dashboards_router.get("/student/at-risk")
+def get_student_at_risk_assessment(
+    database_session: Session = Depends(get_database_session),
+    current_user: UserAccount = Depends(get_current_user),
+):
+    if current_user.account_role != "STUDENT":
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This endpoint is for students only.",
         )
-        .outerjoin(
-            FacultyProfile,
-            GradebookEntry.faculty_account_id == FacultyProfile.faculty_account_id,
-        )
-        .filter(
-            GradebookEntry.student_account_id == current_user.account_id,
-            GradebookEntry.completion_status.in_(["ENROLLED", "IN PROGRESS"]),
-        )
-        .all()
-    )
-
-    schedule = []
-    for entry, subject, faculty in rows:
-        instructor_name = (
-            f"{faculty.first_name} {faculty.last_name}".strip()
-            if faculty else "TBA"
-        )
-        schedule.append({
-            "code":       subject.subject_code,
-            "title":      subject.subject_title,
-            "units":      subject.credit_units,
-            "time":       "TBA",
-            "room":       "TBA",
-            "instructor": instructor_name,
-        })
-
-    return schedule
+    from src.modules.enrollment.at_risk_engine import assess_student_risk
+    result = assess_student_risk(database_session, current_user.account_id)
+    return {
+        "student_account_id":   result.student_account_id,
+        "risk_score":           result.risk_score,
+        "risk_level":           result.risk_level,
+        "breakdown": {
+            "failed_load_score":  result.breakdown.failed_load_score,
+            "gwa_score":          result.breakdown.gwa_score,
+            "variance_score":     result.breakdown.variance_score,
+            "consultation_score": result.breakdown.consultation_score,
+        },
+        "interventions":        result.interventions,
+        "gwa":                  result.gwa,
+        "failed_major_count":   result.failed_major_count,
+        "failed_minor_count":   result.failed_minor_count,
+        "has_any_consultation": result.has_any_consultation,
+    }
 
 
-# ── STUDENT ENROLLMENT STATUS 
+# SE-04: Admin at-risk students list
+
+@dashboards_router.get("/admin/at-risk-students")
+def get_admin_at_risk_students(
+    min_score: int = Query(default=40, ge=0, le=100),
+    database_session: Session = Depends(get_database_session),
+    _admin: UserAccount = Depends(require_admin),
+):
+    return service.get_at_risk_students(database_session, min_score)
+
+
+# STUDENT ENROLLMENT STATUS
 
 @dashboards_router.get("/student/enrollment-status")
 def get_student_enrollment_status(
     database_session: Session = Depends(get_database_session),
     current_user: UserAccount = Depends(get_current_user),
 ):
-    """
-    Returns the student's enrollment request history for the Status tab.
-    """
     if current_user.account_role != "STUDENT":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="This endpoint is for students only.",
         )
-
-    requests = (
-        database_session.query(StudentEnrollmentRequest)
-        .filter(StudentEnrollmentRequest.student_account_id == current_user.account_id)
-        .order_by(StudentEnrollmentRequest.date_submitted.desc())
-        .all()
-    )
-
-    return [
-        {
-            "request_id":         req.request_id,
-            "target_year_level":  req.target_year_level,
-            "target_semester":    req.target_semester,
-            "review_status":      req.review_status,
-            "admin_review_notes": req.admin_review_notes,
-            "date_submitted":     req.date_submitted.isoformat() if req.date_submitted else None,
-        }
-        for req in requests
-    ]
+    return service.get_student_enrollment_history(database_session, current_user.account_id)

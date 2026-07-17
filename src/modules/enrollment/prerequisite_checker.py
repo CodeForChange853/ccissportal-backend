@@ -70,6 +70,7 @@ class SubjectCheckResult:
     prereq_title:    Optional[str]  = None
     prereq_status:   Optional[str]  = None
     blocking_reason: Optional[str]  = None
+    priority_score:  Optional[int]  = None   # SE-05: ranking score for AVAILABLE subjects
 
 
 @dataclass
@@ -459,12 +460,126 @@ def _build_recommendation(
     )
 
 
+# ── SE-05: Priority ranking for AVAILABLE subjects ────────────────────────────
+
+def _compute_priority_scores(
+    results: list[SubjectCheckResult],
+    target_year: int,
+    target_semester: int,
+    all_subjects: list,
+) -> list[SubjectCheckResult]:
+    """
+    Assigns priority_score (0-100) to each AVAILABLE subject.
+    Factors:
+      - Sequence alignment (40%): does the subject belong to the target semester?
+      - Chain advancement value (30%): how many subjects depend on this one (unlocking power)?
+      - Subject type priority (30%): MAJOR > SPECIAL > MINOR
+    """
+    # Build dependent-count map: subject_id -> number of subjects that require it
+    dependents_count: dict[int, int] = {}
+    for s in all_subjects:
+        if s.prerequisite_subject_id is not None:
+            pid = s.prerequisite_subject_id
+            dependents_count[pid] = dependents_count.get(pid, 0) + 1
+    max_dependents = max(dependents_count.values(), default=1)
+
+    type_score = {SUBJECT_MAJOR: 100, SUBJECT_SPECIAL: 60, SUBJECT_MINOR: 30}
+
+    updated = []
+    for r in results:
+        if r.status != AVAILABLE:
+            updated.append(r)
+            continue
+
+        # Find the matching subject for year/sem info
+        matched = next((s for s in all_subjects if s.subject_id == r.subject_id), None)
+        if matched is None:
+            updated.append(r)
+            continue
+
+        # Sequence alignment: exact match = 100, off by 1 sem = 60, off by more = 20
+        sem_diff = abs((matched.target_year_level * 2 + matched.target_semester) -
+                       (target_year * 2 + target_semester))
+        if sem_diff == 0:
+            seq_score = 100
+        elif sem_diff == 1:
+            seq_score = 60
+        elif sem_diff == 2:
+            seq_score = 30
+        else:
+            seq_score = 10
+
+        # Chain advancement: more dependents = higher value
+        dep_count = dependents_count.get(r.subject_id, 0)
+        chain_score = round((dep_count / max_dependents) * 100) if max_dependents > 0 else 0
+
+        # Type priority
+        t_score = type_score.get(r.subject_type, 30)
+
+        priority = round(seq_score * 0.40 + chain_score * 0.30 + t_score * 0.30)
+        updated.append(SubjectCheckResult(
+            subject_id=r.subject_id, subject_code=r.subject_code,
+            subject_title=r.subject_title, credit_units=r.credit_units,
+            status=r.status, subject_type=r.subject_type,
+            prereq_code=r.prereq_code, prereq_title=r.prereq_title,
+            prereq_status=r.prereq_status, blocking_reason=r.blocking_reason,
+            priority_score=priority,
+        ))
+
+    # Sort AVAILABLE subjects by priority descending; non-available stay in place
+    available = sorted([r for r in updated if r.status == AVAILABLE],
+                       key=lambda r: r.priority_score or 0, reverse=True)
+    non_available = [r for r in updated if r.status != AVAILABLE]
+    return available + non_available
+
+
 # ── Public API ────────────────────────────────────────────────────────────────
 
 class PrerequisiteChecker:
 
-    def __init__(self, db: Session) -> None:
-        self._db = db
+    def __init__(
+        self,
+        db: Session,
+        ojt_subject_code: Optional[str] = None,
+        student_ojt_clearance: str = "NOT_REQUIRED",
+    ) -> None:
+        self._db                    = db
+        self._ojt_subject_code      = ojt_subject_code
+        self._student_ojt_clearance = student_ojt_clearance
+
+    def _apply_ojt_gate(
+        self,
+        results: list[SubjectCheckResult],
+    ) -> list[SubjectCheckResult]:
+        """
+        Overrides any non-completed OJT subject to BLOCKED when the student
+        does not have Secretary clearance. No-op when ojt_subject_code is unset.
+        """
+        if not self._ojt_subject_code or self._student_ojt_clearance == "CLEARED":
+            return results
+
+        updated = []
+        for r in results:
+            if (
+                r.subject_code == self._ojt_subject_code
+                and r.status not in (ALREADY_COMPLETED, CURRENTLY_ENROLLED)
+            ):
+                updated.append(SubjectCheckResult(
+                    subject_id=r.subject_id,
+                    subject_code=r.subject_code,
+                    subject_title=r.subject_title,
+                    credit_units=r.credit_units,
+                    subject_type=r.subject_type,
+                    status=BLOCKED,
+                    blocking_reason=(
+                        "OJT clearance documents have not been verified by the Secretary. "
+                        "Submit your MOA, parent consent form, and medical clearance to the "
+                        "Secretariat office before enrolling in this subject."
+                    ),
+                ))
+            else:
+                updated.append(r)
+        return updated
 
     def _load_prereq_subject(
         self, prereq_id: Optional[int]
@@ -518,6 +633,13 @@ class PrerequisiteChecker:
             )
             for s in subjects
         ]
+
+        # SE-05: rank AVAILABLE subjects
+        all_subjects = self._db.query(CurriculumSubject).all()
+        results = _compute_priority_scores(results, year, semester, all_subjects)
+
+        # F-13.1: OJT gate
+        results = self._apply_ojt_gate(results)
 
         return _build_recommendation(results, year, semester)
 
@@ -582,6 +704,9 @@ class PrerequisiteChecker:
 
         target_year = max(year_levels) if year_levels else 0
         target_sem  = max(semesters)   if semesters   else 0
+
+        # F-13.1: OJT gate
+        results = self._apply_ojt_gate(results)
 
         return _build_recommendation(results, target_year, target_sem)
 

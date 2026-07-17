@@ -2,12 +2,13 @@
 
 from fastapi import APIRouter, Depends, Request, status, Query
 from sqlalchemy.orm import Session
+from sqlalchemy import distinct as sa_distinct
 from typing import List
 
 from src.core.security import get_current_user, require_admin
 from src.core.database_setup import get_database_session
 from src.modules.auth.models import UserAccount
-from src.modules.enrollment.models import StudentProfile
+from src.modules.enrollment.models import CurriculumSubject, StudentProfile
 
 from . import schemas, service, repository
 from src.modules.dashboards.schemas import EnrollmentQueueItem
@@ -122,6 +123,85 @@ def submit_bulk_enrollment_decision(
     )
     return {"message": f"Successfully processed {processed_count} enrollments."}
 
+# ── Admin: Student Records (read-only) ───────────────────────────────────────
+@enrollment_router.get("/students", response_model=List[schemas.StudentRecordItem])
+def list_student_records(
+    search:     str = Query(default=None,  description="Search by name or student number"),
+    course:     str = Query(default=None,  description="Filter by course"),
+    year_level: int = Query(default=None,  description="Filter by year level"),
+    skip:       int = Query(default=0,     ge=0),
+    limit:      int = Query(default=200,   ge=1, le=500),
+    database_session: Session = Depends(get_database_session),
+    admin: UserAccount = Depends(require_admin),
+):
+    rows = repository.fetch_student_records(
+        database_session,
+        search=search, course=course, year_level=year_level,
+        skip=skip, limit=limit,
+    )
+    result = []
+    for profile, enrollment_status, cor_status in rows:
+        result.append(schemas.StudentRecordItem(
+            student_account_id=       profile.student_account_id,
+            student_name=             f"{profile.first_name} {profile.last_name}".strip(),
+            student_number=           profile.student_number,
+            course=                   profile.current_course,
+            year_level=               profile.current_year_level,
+            semester=                 profile.current_semester,
+            latest_enrollment_status= enrollment_status,
+            latest_cor_release_status=cor_status,
+            is_irregular=             profile.is_irregular,
+        ))
+    return result
+
+
+# ── Dynamic program/course list (used by Admin Admissions dropdown) ──────────
+@enrollment_router.get("/courses", response_model=List[str])
+def list_available_courses(
+    database_session: Session = Depends(get_database_session),
+    admin: UserAccount = Depends(require_admin),
+):
+    """
+    Return a sorted list of distinct program codes currently in the system.
+    Queries both CurriculumSubject and StudentProfile so that programs added
+    via seeding or direct admission always appear in the dropdown.
+    'COMMON' shared-subjects marker is excluded from the result.
+    """
+    curriculum_courses = (
+        database_session
+        .query(sa_distinct(CurriculumSubject.course))
+        .filter(CurriculumSubject.course.notin_(["COMMON", ""]))
+        .all()
+    )
+    student_courses = (
+        database_session
+        .query(sa_distinct(StudentProfile.current_course))
+        .filter(StudentProfile.current_course.isnot(None))
+        .all()
+    )
+    programs: set[str] = set()
+    for (c,) in curriculum_courses:
+        if c:
+            programs.add(c.strip())
+    for (c,) in student_courses:
+        if c and c.strip() not in ("COMMON", ""):
+            programs.add(c.strip())
+    return sorted(programs)
+
+
+# SE-03 — Prerequisite dependency graph
+@enrollment_router.get("/curriculum/prereq-graph", response_model=schemas.PrereqGraphResponse)
+def get_prereq_graph(
+    database_session: Session = Depends(get_database_session),
+    current_user: UserAccount = Depends(get_current_user),
+):
+    data = repository.fetch_prereq_graph_data(database_session)
+    return schemas.PrereqGraphResponse(
+        nodes=[schemas.PrereqNode(**n) for n in data["nodes"]],
+        edges=[schemas.PrereqEdge(**e) for e in data["edges"]],
+    )
+
+
 @enrollment_router.get("/curriculum", response_model=List[schemas.SubjectResponse])
 def list_all_curriculum_subjects(
     database_session: Session = Depends(get_database_session),
@@ -166,3 +246,112 @@ def modify_curriculum_subject(
         target_subject_id=subject_id,
         update_data=update_data,
     )
+
+
+# ── P4-C: CSV Streaming Exports (admin-only) ──────────────────────────────────
+
+import csv
+import io
+from datetime import date as _date
+from fastapi.responses import StreamingResponse as _StreamingResponse
+
+
+@enrollment_router.get("/export/enrollment-queue.csv")
+def export_enrollment_queue(
+    status_filter: str = Query(default="ALL", description="ALL | PENDING | APPROVED | REJECTED"),
+    database_session: Session = Depends(get_database_session),
+    admin: UserAccount = Depends(require_admin),
+):
+    resolved_filter = None if status_filter == "ALL" else status_filter
+
+    requests_list = repository.fetch_pending_requests_for_admins(
+        database_session, skip=0, limit=None, status_filter=resolved_filter
+    )
+
+    student_ids = [r.student_account_id for r in requests_list]
+    profiles = database_session.query(StudentProfile).filter(
+        StudentProfile.student_account_id.in_(student_ids)
+    ).all()
+    profile_map = {p.student_account_id: p for p in profiles}
+
+    def _generate():
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([
+            "request_id", "student_name", "student_number",
+            "target_year_level", "target_semester",
+            "review_status", "admin_review_notes", "date_submitted",
+        ])
+        yield buf.getvalue()
+
+        for req in requests_list:
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            profile = profile_map.get(req.student_account_id)
+            student_name = f"{profile.first_name} {profile.last_name}".strip() if profile else ""
+            student_number = profile.student_number if profile else ""
+            writer.writerow([
+                req.request_id,
+                student_name,
+                student_number,
+                req.target_year_level,
+                req.target_semester,
+                req.review_status,
+                req.admin_review_notes or "",
+                req.date_submitted.strftime("%Y-%m-%d %H:%M:%S") if req.date_submitted else "",
+            ])
+            yield buf.getvalue()
+
+    filename = f"enrollment-queue-{_date.today().isoformat()}.csv"
+    return _StreamingResponse(
+        _generate(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@enrollment_router.get("/export/student-records.csv")
+def export_student_records(
+    search: str = Query(default=None),
+    course: str = Query(default=None),
+    year_level: int = Query(default=None),
+    database_session: Session = Depends(get_database_session),
+    admin: UserAccount = Depends(require_admin),
+):
+    rows = repository.fetch_student_records(
+        database_session,
+        search=search, course=course, year_level=year_level,
+        skip=0, limit=None,
+    )
+
+    def _generate():
+        buf = io.StringIO()
+        writer = csv.writer(buf)
+        writer.writerow([
+            "student_name", "student_number", "course", "year_level",
+            "semester", "latest_enrollment_status",
+            "latest_cor_release_status", "is_irregular",
+        ])
+        yield buf.getvalue()
+
+        for profile, enrollment_status, cor_status in rows:
+            buf = io.StringIO()
+            writer = csv.writer(buf)
+            writer.writerow([
+                f"{profile.first_name} {profile.last_name}".strip(),
+                profile.student_number or "",
+                profile.current_course or "",
+                profile.current_year_level or "",
+                profile.current_semester or "",
+                enrollment_status or "",
+                cor_status or "",
+                "Yes" if profile.is_irregular else "No",
+            ])
+            yield buf.getvalue()
+
+    filename = f"student-records-{_date.today().isoformat()}.csv"
+    return _StreamingResponse(
+        _generate(),
+        media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )

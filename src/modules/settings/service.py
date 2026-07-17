@@ -1,14 +1,17 @@
 # backend-v2/src/modules/settings/service.py
 
-import random
+import secrets
 import string
+from datetime import datetime
 from typing import Optional
+
 from sqlalchemy.orm import Session
 from fastapi import HTTPException, status
 
 from . import repository, schemas
-
 from src.modules.audit import service as audit_service
+
+_PASSKEY_ALPHABET = string.ascii_uppercase + string.digits
 
 
 # Internal helper — used by other modules (enrollment, auth)
@@ -59,7 +62,7 @@ def apply_settings_update(
     actor_email: Optional[str] = None,
     ip_address: Optional[str] = None,
 ) -> schemas.SystemSettingsResponse:
-  
+
     settings_row = _require_settings_row(database_session)
 
     update_dict = update_payload.model_dump(exclude_none=True)
@@ -75,6 +78,15 @@ def apply_settings_update(
         settings_row=settings_row,
         updated_fields=update_dict,
     )
+
+    # If maintenance mode was toggled, bust the in-process cache in main.py immediately
+    # so the very next request picks up the new state instead of waiting for TTL expiry.
+    if "is_maintenance_mode" in update_dict:
+        try:
+            from src.main import _MAINT_CACHE
+            _MAINT_CACHE["ts"] = 0.0
+        except Exception:
+            pass  # safe to ignore — cache will self-expire within TTL
 
     audit_service.log_event(
         database_session=database_session,
@@ -96,11 +108,9 @@ def generate_new_passkey(
     ip_address: Optional[str] = None,
 ) -> schemas.SystemSettingsResponse:
 
-    year = __import__("datetime").datetime.now().year
-    random_suffix = "".join(
-        random.choices(string.ascii_uppercase + string.digits, k=6)
-    )
-    new_passkey = f"UNIV-{year}-{random_suffix}"
+    year = datetime.now().year
+    suffix = "".join(secrets.choice(_PASSKEY_ALPHABET) for _ in range(8))
+    new_passkey = f"UNIV-{year}-{suffix}"
 
     settings_row = _require_settings_row(database_session)
 

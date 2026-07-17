@@ -26,6 +26,12 @@ class SystemSettings(Base):
     maintenance_reason = Column(String(255), nullable=True)
     maintenance_message = Column(String(500), nullable=True)
 
+    # Wall of Shame
+    wall_of_shame_cooldown_days = Column(Integer, nullable=False, default=60)
+
+    # F-13.1: OJT subject code — if set, enrollment into this subject requires Secretary clearance
+    ojt_subject_code = Column(String(50), nullable=True)
+
     # Audit 
     last_updated_at = Column(
         DateTime(timezone=True),

@@ -1,6 +1,6 @@
 # backend-v2/src/modules/audit/router.py
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 from typing import Optional
 
@@ -36,3 +36,35 @@ def get_audit_summary(
     _: UserAccount            = Depends(require_admin),
 ):
     return service.get_summary(database_session=database_session)
+
+
+# SE-08 — Trigger narrative generation for PENDING events
+@audit_router.post(
+    "/process-narratives",
+    response_model=schemas.NarrativeRunResponse,
+)
+def process_narratives(
+    database_session: Session = Depends(get_database_session),
+    _: UserAccount            = Depends(require_admin),
+):
+    result = service.process_pending_narratives(database_session)
+    return schemas.NarrativeRunResponse(**result)
+
+
+# SE-08 — Mark a narrative as acknowledged by admin
+@audit_router.post(
+    "/events/{event_id}/acknowledge-narrative",
+    response_model=schemas.AuditEventOut,
+)
+def acknowledge_narrative(
+    event_id: int,
+    database_session: Session = Depends(get_database_session),
+    _: UserAccount            = Depends(require_admin),
+):
+    event = service.acknowledge_narrative(database_session, event_id)
+    if event is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Audit event #{event_id} not found.",
+        )
+    return event

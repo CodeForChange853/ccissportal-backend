@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, JSON
+from sqlalchemy import Column, Integer, String, Boolean, DateTime, ForeignKey, JSON, Index
 from sqlalchemy.sql import func
 from src.core.database_setup import Base
 
@@ -56,6 +56,18 @@ class StudentEnrollmentRequest(Base):
         DateTime(timezone=True), server_default=func.now()
     )
 
+    # COR release tracking (set after admin approves enrollment)
+    cor_release_status          = Column(String(20), default="PENDING", nullable=False, server_default="PENDING")
+    cor_released_at             = Column(DateTime(timezone=True), nullable=True)
+    cor_released_by_secretary_id = Column(Integer, nullable=True)
+
+    __table_args__ = (
+        # Admin queue: filter by review_status, order by date_submitted
+        Index("ix_enrollment_status_submitted", "review_status", "date_submitted"),
+        # Student enrollment history lookups
+        Index("ix_enrollment_student_submitted", "student_account_id", "date_submitted"),
+    )
+
 
 class StudentProfile(Base):
 
@@ -79,3 +91,9 @@ class StudentProfile(Base):
     is_ai_verified   = Column(Boolean, default=False, nullable=False)
     is_irregular     = Column(Boolean, default=False, nullable=False)
     security_flags   = Column(JSON, nullable=True) # Tracks reasons for flagging
+
+    # F-13.1: OJT clearance gate — values: NOT_REQUIRED | PENDING | CLEARED | BLOCKED
+    ojt_clearance_status = Column(String(20), nullable=False, default="NOT_REQUIRED", server_default="NOT_REQUIRED")
+
+    # F-13.5: Equipment clearance gate — values: CLEARED | UNCLEARED
+    equipment_clearance_status = Column(String(20), nullable=False, default="CLEARED", server_default="CLEARED")

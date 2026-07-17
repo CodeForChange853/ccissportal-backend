@@ -25,6 +25,10 @@ class FacultyProfile(Base):
     current_teaching_load  = Column(Integer, default=0)
     is_available_for_classes = Column(Boolean, default=True)
 
+    # SE-02 — Intelligent matching fields (added via ALTER TABLE on startup)
+    specialization_tags = Column(Text, nullable=True)
+    performance_score   = Column(Float, nullable=True, default=0.0)
+
 
 class GradebookEntry(Base):
 
